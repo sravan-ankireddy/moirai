@@ -49,10 +49,12 @@ def parse_args():
                         help='Column number to analyze (0-indexed, default: 1 for 2nd column)')
     parser.add_argument('--analysis-freq', type=int, default=None,
                         help='Generate plots after every N windows (default: None, plot only at end)')
+    parser.add_argument('--context-keep-ratio', type=float, default=0.75,
+                        help='Ratio of context to keep in reduced methods (default: 0.75 for 75%%)')
     
     return parser.parse_args()
 
-# Parse command line arguments
+# Parse command line arguments.
 args = parse_args()
 
 # Set CUDA device
@@ -65,12 +67,13 @@ SIZE = args.size
 PDT = args.pdt
 CTX = args.ctx
 INPUT_CTX = args.input_ctx if args.input_ctx is not None else args.ctx
-PSZ = args.psz
+PSZ = 16#args.psz
 BSZ = args.bsz
 TEST = args.test if args.test is not None else int(1000 * PDT)
 NUM_SAMPLES = args.num_samples
 COLUMN_NUM = args.column
 ANALYSIS_FREQ = args.analysis_freq
+CONTEXT_KEEP_RATIO = args.context_keep_ratio
 
 print(f"Configuration:")
 print(f"  Model: {MODEL}-{SIZE}")
@@ -84,6 +87,7 @@ print(f"  Num Samples: {NUM_SAMPLES}")
 print(f"  CSV Path: {args.csv_path}")
 print(f"  Column: {COLUMN_NUM} (0-indexed)")
 print(f"  Analysis Frequency: {ANALYSIS_FREQ if ANALYSIS_FREQ else 'End only'}")
+print(f"  Context Keep Ratio: {CONTEXT_KEEP_RATIO} ({CONTEXT_KEEP_RATIO*100:.0f}%)")
 
 # Read data into pandas DataFrame
 csv_path = args.csv_path
@@ -104,8 +108,8 @@ selected_column = available_columns[args.column]
 SELECTED_COLUMN = selected_column  # Make it global for plotting functions
 print(f"Selected column {args.column}: '{selected_column}'")
 
-# Create results directory structure with dataset name
-results_dir = f"results_v3_v3/{dataset_name}/{MODEL}-{SIZE}/ctx{CTX}"
+# Create results directory structure with dataset name and compression ratio
+results_dir = f"results_v3_patch16/{dataset_name}/{MODEL}-{SIZE}/ctx{CTX}/comp{CONTEXT_KEEP_RATIO:.2f}"
 os.makedirs(results_dir, exist_ok=True)
 print(f"Results will be saved to: {results_dir}")
 
@@ -396,12 +400,17 @@ def calculate_autoregressive_input_uncertainty(input_data, window_id, full_datas
 
 def perform_forecasting_comparison_with_uncertainty(input_data, label_data, importance_scores, window_id):
     """
-    Perform forecasting with uncertainty analysis for FIVE different context selection strategies:
+    Perform forecasting with uncertainty analysis for TEN different context selection strategies:
     1. Full context (all CTX samples)
-    2. Random 75% of context
-    3. Most important 75% of context
-    4. Random 75% with interpolation (maintaining original context length)
-    5. Most important 75% with interpolation (maintaining original context length)
+    2. Random subset of context (configurable %)
+    3. Most important subset of context (configurable %)
+    4. Random subset with interpolation (maintaining original context length)
+    5. Most important subset with interpolation (maintaining original context length)
+    6. Least important subset of context (configurable %)
+    7. Least important subset with interpolation (maintaining original context length)
+    8. Uniform sampling by compression ratio (drop every Nth sample)
+    9. Uniform sampling with resampling (drop every Nth then resample back to original length)
+    10. Recent context only (take most recent compression_ratio * CTX samples)
     """
     # Get the target data and ensure it's exactly CTX length
     target_data = input_data['target']
@@ -413,11 +422,11 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
         context_target = target_data
     
     actual_context_length = len(context_target)
-    reduced_ctx = max(1, int(0.75 * actual_context_length))  # 75% of actual context
+    reduced_ctx = max(1, int(CONTEXT_KEEP_RATIO * actual_context_length))  # configurable % of actual context
     
-    print(f"Window {window_id} Forecasting with Uncertainty (5 Methods):")
+    print(f"Window {window_id} Forecasting with Uncertainty (10 Methods):")
     print(f"  Full context length: {actual_context_length}")
-    print(f"  Reduced context length (75%): {reduced_ctx}")
+    print(f"  Reduced context length ({CONTEXT_KEEP_RATIO*100:.0f}%): {reduced_ctx}")
     
     # 1. Full context forecasting with uncertainty
     print(f"  1. Full context forecasting with uncertainty...")
@@ -454,8 +463,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_full = calculate_forecast_uncertainty(predictor_full, forecast_input_data_full, PDT)
     
-    # 2. Random 75% context forecasting with uncertainty
-    print(f"  2. Random 75% context forecasting with uncertainty...")
+    # 2. Random ${CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty
+    print(f"  2. Random ${CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty...")
     np.random.seed(42 + window_id)  # Reproducible random selection
     random_indices = np.sort(np.random.choice(actual_context_length, reduced_ctx, replace=False))
     context_target_random = context_target[random_indices]
@@ -492,8 +501,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_random = calculate_forecast_uncertainty(predictor_random, forecast_input_data_random, PDT)
     
-    # 3. Most important 75% context forecasting with uncertainty
-    print(f"  3. Most important 75% context forecasting with uncertainty...")
+    # 3. Most important {CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty
+    print(f"  3. Most important {CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty...")
     
     # Ensure importance scores match the context length
     if len(importance_scores) == actual_context_length:
@@ -544,8 +553,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_most_important = calculate_forecast_uncertainty(predictor_most_important, forecast_input_data_most_important, PDT)
     
-    # 4. Random 75% with interpolation (maintaining original context length)
-    print(f"  4. Random 75% with interpolation forecasting...")
+    # 4. Random ${CONTEXT_KEEP_RATIO*100:.0f}% with interpolation (maintaining original context length)
+    print(f"  4. Random ${CONTEXT_KEEP_RATIO*100:.0f}% with interpolation forecasting...")
     
     # Get indices to remove (25% least important random samples)
     missing_random_indices = np.setdiff1d(np.arange(actual_context_length), random_indices)
@@ -562,8 +571,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Use full context length model since we maintain original length
     forecast_uncertainty_random_interp = calculate_forecast_uncertainty(predictor_full, forecast_input_data_random_interp, PDT)
     
-    # 5. Most important 75% with interpolation (maintaining original context length)
-    print(f"  5. Most important 75% with interpolation forecasting...")
+    # 5. Most important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation (maintaining original context length)
+    print(f"  5. Most important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation forecasting...")
     
     # Get indices to remove (25% least important samples)
     missing_important_indices = np.setdiff1d(np.arange(actual_context_length), most_important_indices)
@@ -580,8 +589,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Use full context length model since we maintain original length
     forecast_uncertainty_important_interp = calculate_forecast_uncertainty(predictor_full, forecast_input_data_important_interp, PDT)
     
-    # 6. Least important 75% (keep least important samples)
-    print(f"  6. Least important 75% context forecasting...")
+    # 6. Least important {CONTEXT_KEEP_RATIO*100:.0f}% (keep least important samples)
+    print(f"  6. Least important {CONTEXT_KEEP_RATIO*100:.0f}% context forecasting...")
     
     # Select the least important samples (opposite of most important)
     least_important_indices = np.argsort(context_importance)[:reduced_ctx]
@@ -620,8 +629,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_least_important = calculate_forecast_uncertainty(predictor_least_important, forecast_input_data_least_important, PDT)
     
-    # 7. Least important 75% with interpolation (maintaining original context length)
-    print(f"  7. Least important 75% with interpolation forecasting...")
+    # 7. Least important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation (maintaining original context length)
+    print(f"  7. Least important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation forecasting...")
     
     # Get indices to remove (25% most important samples)
     missing_least_important_indices = np.setdiff1d(np.arange(actual_context_length), least_important_indices)
@@ -638,10 +647,108 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Use full context length model since we maintain original length
     forecast_uncertainty_least_important_interp = calculate_forecast_uncertainty(predictor_full, forecast_input_data_least_important_interp, PDT)
     
+    # 8. Uniform sampling by compression ratio (drop every Nth sample)
+    print(f"  8. Uniform sampling ({CONTEXT_KEEP_RATIO*100:.0f}%) forecasting...")
+    
+    # Calculate sampling step to achieve target compression
+    step_size = max(1, int(1 / CONTEXT_KEEP_RATIO))
+    uniform_indices = np.arange(0, actual_context_length, step_size)[:reduced_ctx]
+    context_target_uniform = context_target[uniform_indices]
+    
+    forecast_input_data_uniform = {
+        'target': context_target_uniform,
+        'start': input_data['start'],
+        'item_id': input_data.get('item_id', 0)
+    }
+    
+    if MODEL == "moirai":
+        model_uniform = MoiraiForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_uniform),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    elif MODEL == "moirai-moe":
+        model_uniform = MoiraiMoEForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_uniform),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    predictor_uniform = model_uniform.create_predictor(batch_size=BSZ)
+    
+    forecast_uncertainty_uniform = calculate_forecast_uncertainty(predictor_uniform, forecast_input_data_uniform, PDT)
+    
+    # 9. Uniform sampling with resampling (drop every Nth then resample back to original length)
+    print(f"  9. Uniform sampling with resampling ({CONTEXT_KEEP_RATIO*100:.0f}%) forecasting...")
+    
+    # Get indices that would be missing in uniform sampling
+    all_indices = np.arange(actual_context_length)
+    missing_uniform_indices = np.setdiff1d(all_indices, uniform_indices)
+    
+    # Interpolate missing values to maintain original context length
+    context_target_uniform_resampled = interpolate_missing_values(context_target, missing_uniform_indices)
+    
+    forecast_input_data_uniform_resampled = {
+        'target': context_target_uniform_resampled,
+        'start': input_data['start'],
+        'item_id': input_data.get('item_id', 0)
+    }
+    
+    # Use full context length model since we maintain original length
+    forecast_uncertainty_uniform_resampled = calculate_forecast_uncertainty(predictor_full, forecast_input_data_uniform_resampled, PDT)
+    
+    # 10. Recent context only (take most recent compression_ratio * CTX samples)
+    print(f"  10. Recent context only ({CONTEXT_KEEP_RATIO*100:.0f}%) forecasting...")
+    
+    # Take the most recent samples based on compression ratio
+    recent_context_length = max(1, int(CONTEXT_KEEP_RATIO * actual_context_length))
+    context_target_recent = context_target[-recent_context_length:]
+    
+    forecast_input_data_recent = {
+        'target': context_target_recent,
+        'start': input_data['start'],
+        'item_id': input_data.get('item_id', 0)
+    }
+    
+    if MODEL == "moirai":
+        model_recent = MoiraiForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_recent),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    elif MODEL == "moirai-moe":
+        model_recent = MoiraiMoEForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_recent),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    predictor_recent = model_recent.create_predictor(batch_size=BSZ)
+    
+    forecast_uncertainty_recent = calculate_forecast_uncertainty(predictor_recent, forecast_input_data_recent, PDT)
+    
     # Get true values for comparison
     true_values = label_data["target"][:PDT]
     
-    # Calculate forecast metrics for all five methods
+    # Calculate forecast metrics for all ten methods
     def calculate_metrics(forecast_mean, true_vals):
         forecast_errors = np.abs(forecast_mean - true_vals)
         mae = np.mean(forecast_errors)
@@ -670,14 +777,26 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Least important with interpolation
     mae_least_important_interp, rmse_least_important_interp, forecast_errors_least_important_interp = calculate_metrics(forecast_uncertainty_least_important_interp['mean'], true_values)
     
+    # Uniform sampling
+    mae_uniform, rmse_uniform, forecast_errors_uniform = calculate_metrics(forecast_uncertainty_uniform['mean'], true_values)
+    
+    # Uniform resampling
+    mae_uniform_resampled, rmse_uniform_resampled, forecast_errors_uniform_resampled = calculate_metrics(forecast_uncertainty_uniform_resampled['mean'], true_values)
+    
+    # Recent context
+    mae_recent, rmse_recent, forecast_errors_recent = calculate_metrics(forecast_uncertainty_recent['mean'], true_values)
+    
     print(f"  Results:")
     print(f"    Full Context (len={actual_context_length})        - MAE: {mae_full:.4f}, RMSE: {rmse_full:.4f}, CV_unc: {np.mean(forecast_uncertainty_full['cv_uncertainty']):.4f}")
-    print(f"    Random 75% (len={reduced_ctx})                   - MAE: {mae_random:.4f}, RMSE: {rmse_random:.4f}, CV_unc: {np.mean(forecast_uncertainty_random['cv_uncertainty']):.4f}")
-    print(f"    Most Imp 75% (len={reduced_ctx})                 - MAE: {mae_most_important:.4f}, RMSE: {rmse_most_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_most_important['cv_uncertainty']):.4f}")
-    print(f"    Random 75% + Interp (len={actual_context_length}) - MAE: {mae_random_interp:.4f}, RMSE: {rmse_random_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_random_interp['cv_uncertainty']):.4f}")
-    print(f"    Most Imp 75% + Interp (len={actual_context_length}) - MAE: {mae_important_interp:.4f}, RMSE: {rmse_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_important_interp['cv_uncertainty']):.4f}")
-    print(f"    Least Imp 75% (len={reduced_ctx})                - MAE: {mae_least_important:.4f}, RMSE: {rmse_least_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important['cv_uncertainty']):.4f}")
-    print(f"    Least Imp 75% + Interp (len={actual_context_length}) - MAE: {mae_least_important_interp:.4f}, RMSE: {rmse_least_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important_interp['cv_uncertainty']):.4f}")
+    print(f"    Random ${CONTEXT_KEEP_RATIO*100:.0f}% (len={reduced_ctx})                   - MAE: {mae_random:.4f}, RMSE: {rmse_random:.4f}, CV_unc: {np.mean(forecast_uncertainty_random['cv_uncertainty']):.4f}")
+    print(f"    Most Imp {CONTEXT_KEEP_RATIO*100:.0f}% (len={reduced_ctx})                 - MAE: {mae_most_important:.4f}, RMSE: {rmse_most_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_most_important['cv_uncertainty']):.4f}")
+    print(f"    Random ${CONTEXT_KEEP_RATIO*100:.0f}% + Interp (len={actual_context_length}) - MAE: {mae_random_interp:.4f}, RMSE: {rmse_random_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_random_interp['cv_uncertainty']):.4f}")
+    print(f"    Most Imp {CONTEXT_KEEP_RATIO*100:.0f}% + Interp (len={actual_context_length}) - MAE: {mae_important_interp:.4f}, RMSE: {rmse_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_important_interp['cv_uncertainty']):.4f}")
+    print(f"    Least Imp {CONTEXT_KEEP_RATIO*100:.0f}% (len={reduced_ctx})                - MAE: {mae_least_important:.4f}, RMSE: {rmse_least_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important['cv_uncertainty']):.4f}")
+    print(f"    Least Imp {CONTEXT_KEEP_RATIO*100:.0f}% + Interp (len={actual_context_length}) - MAE: {mae_least_important_interp:.4f}, RMSE: {rmse_least_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important_interp['cv_uncertainty']):.4f}")
+    print(f"    Uniform Sampling (len={reduced_ctx})                   - MAE: {mae_uniform:.4f}, RMSE: {rmse_uniform:.4f}, CV_unc: {np.mean(forecast_uncertainty_uniform['cv_uncertainty']):.4f}")
+    print(f"    Uniform Resampling (len={actual_context_length}) - MAE: {mae_uniform_resampled:.4f}, RMSE: {rmse_uniform_resampled:.4f}, CV_unc: {np.mean(forecast_uncertainty_uniform_resampled['cv_uncertainty']):.4f}")
+    print(f"    Recent Context (len={recent_context_length})                   - MAE: {mae_recent:.4f}, RMSE: {rmse_recent:.4f}, CV_unc: {np.mean(forecast_uncertainty_recent['cv_uncertainty']):.4f}")
     
     return {
         'window_id': window_id,
@@ -718,6 +837,21 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
         'rmse_least_important_interp': rmse_least_important_interp,
         'forecast_errors_least_important_interp': forecast_errors_least_important_interp,
         'forecast_uncertainty_least_important_interp': forecast_uncertainty_least_important_interp,
+        # Uniform sampling results
+        'mae_uniform': mae_uniform,
+        'rmse_uniform': rmse_uniform,
+        'forecast_errors_uniform': forecast_errors_uniform,
+        'forecast_uncertainty_uniform': forecast_uncertainty_uniform,
+        # Uniform resampling results
+        'mae_uniform_resampled': mae_uniform_resampled,
+        'rmse_uniform_resampled': rmse_uniform_resampled,
+        'forecast_errors_uniform_resampled': forecast_errors_uniform_resampled,
+        'forecast_uncertainty_uniform_resampled': forecast_uncertainty_uniform_resampled,
+        # Recent context results
+        'mae_recent': mae_recent,
+        'rmse_recent': rmse_recent,
+        'forecast_errors_recent': forecast_errors_recent,
+        'forecast_uncertainty_recent': forecast_uncertainty_recent,
         # Common data
         'true_values': true_values,
         'random_indices': random_indices,
@@ -743,11 +877,11 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
         context_target = target_data
     
     actual_context_length = len(context_target)
-    reduced_ctx = max(1, int(0.75 * actual_context_length))  # 75% of actual context
+    reduced_ctx = max(1, int(CONTEXT_KEEP_RATIO * actual_context_length))  # configurable % of actual context
     
     print(f"Window {window_id} Forecasting with Uncertainty:")
     print(f"  Full context length: {actual_context_length}")
-    print(f"  Reduced context length (75%): {reduced_ctx}")
+    print(f"  Reduced context length ({CONTEXT_KEEP_RATIO*100:.0f}%): {reduced_ctx}")
     
     # 1. Full context forecasting with uncertainty
     print(f"  1. Full context forecasting with uncertainty...")
@@ -784,8 +918,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_full = calculate_forecast_uncertainty(predictor_full, forecast_input_data_full, PDT)
     
-    # 2. Random 75% context forecasting with uncertainty
-    print(f"  2. Random 75% context forecasting with uncertainty...")
+    # 2. Random ${CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty
+    print(f"  2. Random ${CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty...")
     np.random.seed(42 + window_id)  # Reproducible random selection
     random_indices = np.sort(np.random.choice(actual_context_length, reduced_ctx, replace=False))
     context_target_random = context_target[random_indices]
@@ -822,8 +956,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_random = calculate_forecast_uncertainty(predictor_random, forecast_input_data_random, PDT)
     
-    # 3. Most important 75% context forecasting with uncertainty
-    print(f"  3. Most important 75% context forecasting with uncertainty...")
+    # 3. Most important {CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty
+    print(f"  3. Most important {CONTEXT_KEEP_RATIO*100:.0f}% context forecasting with uncertainty...")
     
     # Ensure importance scores match the context length
     if len(importance_scores) == actual_context_length:
@@ -874,8 +1008,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_most_important = calculate_forecast_uncertainty(predictor_most_important, forecast_input_data_most_important, PDT)
     
-    # 4. Random 75% with interpolation (maintaining original context length)
-    print(f"  4. Random 75% with interpolation forecasting...")
+    # 4. Random ${CONTEXT_KEEP_RATIO*100:.0f}% with interpolation (maintaining original context length)
+    print(f"  4. Random ${CONTEXT_KEEP_RATIO*100:.0f}% with interpolation forecasting...")
     
     # Get indices to remove (25% least important random samples)
     missing_random_indices = np.setdiff1d(np.arange(actual_context_length), random_indices)
@@ -892,8 +1026,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Use full context length model since we maintain original length
     forecast_uncertainty_random_interp = calculate_forecast_uncertainty(predictor_full, forecast_input_data_random_interp, PDT)
     
-    # 5. Most important 75% with interpolation (maintaining original context length)
-    print(f"  5. Most important 75% with interpolation forecasting...")
+    # 5. Most important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation (maintaining original context length)
+    print(f"  5. Most important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation forecasting...")
     
     # Get indices to remove (25% least important samples)
     missing_important_indices = np.setdiff1d(np.arange(actual_context_length), most_important_indices)
@@ -910,8 +1044,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Use full context length model since we maintain original length
     forecast_uncertainty_important_interp = calculate_forecast_uncertainty(predictor_full, forecast_input_data_important_interp, PDT)
     
-    # 6. Least important 75% (keep least important samples)
-    print(f"  6. Least important 75% context forecasting...")
+    # 6. Least important {CONTEXT_KEEP_RATIO*100:.0f}% (keep least important samples)
+    print(f"  6. Least important {CONTEXT_KEEP_RATIO*100:.0f}% context forecasting...")
     
     # Select the least important samples (opposite of most important)
     least_important_indices = np.argsort(context_importance)[:reduced_ctx]
@@ -950,8 +1084,8 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     
     forecast_uncertainty_least_important = calculate_forecast_uncertainty(predictor_least_important, forecast_input_data_least_important, PDT)
     
-    # 7. Least important 75% with interpolation (maintaining original context length)
-    print(f"  7. Least important 75% with interpolation forecasting...")
+    # 7. Least important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation (maintaining original context length)
+    print(f"  7. Least important {CONTEXT_KEEP_RATIO*100:.0f}% with interpolation forecasting...")
     
     # Get indices to remove (25% most important samples)
     missing_least_important_indices = np.setdiff1d(np.arange(actual_context_length), least_important_indices)
@@ -968,10 +1102,108 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Use full context length model since we maintain original length
     forecast_uncertainty_least_important_interp = calculate_forecast_uncertainty(predictor_full, forecast_input_data_least_important_interp, PDT)
     
+    # 8. Uniform sampling by compression ratio (drop every Nth sample)
+    print(f"  8. Uniform sampling ({CONTEXT_KEEP_RATIO*100:.0f}%) forecasting...")
+    
+    # Calculate sampling step to achieve target compression
+    step_size = max(1, int(1 / CONTEXT_KEEP_RATIO))
+    uniform_indices = np.arange(0, actual_context_length, step_size)[:reduced_ctx]
+    context_target_uniform = context_target[uniform_indices]
+    
+    forecast_input_data_uniform = {
+        'target': context_target_uniform,
+        'start': input_data['start'],
+        'item_id': input_data.get('item_id', 0)
+    }
+    
+    if MODEL == "moirai":
+        model_uniform = MoiraiForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_uniform),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    elif MODEL == "moirai-moe":
+        model_uniform = MoiraiMoEForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_uniform),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    predictor_uniform = model_uniform.create_predictor(batch_size=BSZ)
+    
+    forecast_uncertainty_uniform = calculate_forecast_uncertainty(predictor_uniform, forecast_input_data_uniform, PDT)
+    
+    # 9. Uniform sampling with resampling (drop every Nth then resample back to original length)
+    print(f"  9. Uniform sampling with resampling ({CONTEXT_KEEP_RATIO*100:.0f}%) forecasting...")
+    
+    # Get indices that would be missing in uniform sampling
+    all_indices = np.arange(actual_context_length)
+    missing_uniform_indices = np.setdiff1d(all_indices, uniform_indices)
+    
+    # Interpolate missing values to maintain original context length
+    context_target_uniform_resampled = interpolate_missing_values(context_target, missing_uniform_indices)
+    
+    forecast_input_data_uniform_resampled = {
+        'target': context_target_uniform_resampled,
+        'start': input_data['start'],
+        'item_id': input_data.get('item_id', 0)
+    }
+    
+    # Use full context length model since we maintain original length
+    forecast_uncertainty_uniform_resampled = calculate_forecast_uncertainty(predictor_full, forecast_input_data_uniform_resampled, PDT)
+    
+    # 10. Recent context only (take most recent compression_ratio * CTX samples)
+    print(f"  10. Recent context only ({CONTEXT_KEEP_RATIO*100:.0f}%) forecasting...")
+    
+    # Take the most recent samples based on compression ratio
+    recent_context_length = max(1, int(CONTEXT_KEEP_RATIO * actual_context_length))
+    context_target_recent = context_target[-recent_context_length:]
+    
+    forecast_input_data_recent = {
+        'target': context_target_recent,
+        'start': input_data['start'],
+        'item_id': input_data.get('item_id', 0)
+    }
+    
+    if MODEL == "moirai":
+        model_recent = MoiraiForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_recent),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    elif MODEL == "moirai-moe":
+        model_recent = MoiraiMoEForecast(
+            module=base_module,
+            prediction_length=PDT,
+            context_length=len(context_target_recent),
+            patch_size=PSZ,
+            num_samples=NUM_SAMPLES,
+            target_dim=1,
+            feat_dynamic_real_dim=ds.num_feat_dynamic_real,
+            past_feat_dynamic_real_dim=ds.num_past_feat_dynamic_real,
+        )
+    predictor_recent = model_recent.create_predictor(batch_size=BSZ)
+    
+    forecast_uncertainty_recent = calculate_forecast_uncertainty(predictor_recent, forecast_input_data_recent, PDT)
+    
     # Get true values for comparison
     true_values = label_data["target"][:PDT]
     
-    # Calculate forecast metrics for all five methods
+    # Calculate forecast metrics for all ten methods
     def calculate_metrics(forecast_mean, true_vals):
         forecast_errors = np.abs(forecast_mean - true_vals)
         mae = np.mean(forecast_errors)
@@ -1000,14 +1232,26 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
     # Least important with interpolation
     mae_least_important_interp, rmse_least_important_interp, forecast_errors_least_important_interp = calculate_metrics(forecast_uncertainty_least_important_interp['mean'], true_values)
     
+    # Uniform sampling
+    mae_uniform, rmse_uniform, forecast_errors_uniform = calculate_metrics(forecast_uncertainty_uniform['mean'], true_values)
+    
+    # Uniform resampling
+    mae_uniform_resampled, rmse_uniform_resampled, forecast_errors_uniform_resampled = calculate_metrics(forecast_uncertainty_uniform_resampled['mean'], true_values)
+    
+    # Recent context
+    mae_recent, rmse_recent, forecast_errors_recent = calculate_metrics(forecast_uncertainty_recent['mean'], true_values)
+    
     print(f"  Results:")
     print(f"    Full Context (len={actual_context_length})        - MAE: {mae_full:.4f}, RMSE: {rmse_full:.4f}, CV_unc: {np.mean(forecast_uncertainty_full['cv_uncertainty']):.4f}")
-    print(f"    Random 75% (len={reduced_ctx})                   - MAE: {mae_random:.4f}, RMSE: {rmse_random:.4f}, CV_unc: {np.mean(forecast_uncertainty_random['cv_uncertainty']):.4f}")
-    print(f"    Most Imp 75% (len={reduced_ctx})                 - MAE: {mae_most_important:.4f}, RMSE: {rmse_most_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_most_important['cv_uncertainty']):.4f}")
-    print(f"    Random 75% + Interp (len={actual_context_length}) - MAE: {mae_random_interp:.4f}, RMSE: {rmse_random_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_random_interp['cv_uncertainty']):.4f}")
-    print(f"    Most Imp 75% + Interp (len={actual_context_length}) - MAE: {mae_important_interp:.4f}, RMSE: {rmse_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_important_interp['cv_uncertainty']):.4f}")
-    print(f"    Least Imp 75% (len={reduced_ctx})                - MAE: {mae_least_important:.4f}, RMSE: {rmse_least_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important['cv_uncertainty']):.4f}")
-    print(f"    Least Imp 75% + Interp (len={actual_context_length}) - MAE: {mae_least_important_interp:.4f}, RMSE: {rmse_least_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important_interp['cv_uncertainty']):.4f}")
+    print(f"    Random ${CONTEXT_KEEP_RATIO*100:.0f}% (len={reduced_ctx})                   - MAE: {mae_random:.4f}, RMSE: {rmse_random:.4f}, CV_unc: {np.mean(forecast_uncertainty_random['cv_uncertainty']):.4f}")
+    print(f"    Most Imp {CONTEXT_KEEP_RATIO*100:.0f}% (len={reduced_ctx})                 - MAE: {mae_most_important:.4f}, RMSE: {rmse_most_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_most_important['cv_uncertainty']):.4f}")
+    print(f"    Random ${CONTEXT_KEEP_RATIO*100:.0f}% + Interp (len={actual_context_length}) - MAE: {mae_random_interp:.4f}, RMSE: {rmse_random_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_random_interp['cv_uncertainty']):.4f}")
+    print(f"    Most Imp {CONTEXT_KEEP_RATIO*100:.0f}% + Interp (len={actual_context_length}) - MAE: {mae_important_interp:.4f}, RMSE: {rmse_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_important_interp['cv_uncertainty']):.4f}")
+    print(f"    Least Imp {CONTEXT_KEEP_RATIO*100:.0f}% (len={reduced_ctx})                - MAE: {mae_least_important:.4f}, RMSE: {rmse_least_important:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important['cv_uncertainty']):.4f}")
+    print(f"    Least Imp {CONTEXT_KEEP_RATIO*100:.0f}% + Interp (len={actual_context_length}) - MAE: {mae_least_important_interp:.4f}, RMSE: {rmse_least_important_interp:.4f}, CV_unc: {np.mean(forecast_uncertainty_least_important_interp['cv_uncertainty']):.4f}")
+    print(f"    Uniform Sampling (len={reduced_ctx})                   - MAE: {mae_uniform:.4f}, RMSE: {rmse_uniform:.4f}, CV_unc: {np.mean(forecast_uncertainty_uniform['cv_uncertainty']):.4f}")
+    print(f"    Uniform Resampling (len={actual_context_length}) - MAE: {mae_uniform_resampled:.4f}, RMSE: {rmse_uniform_resampled:.4f}, CV_unc: {np.mean(forecast_uncertainty_uniform_resampled['cv_uncertainty']):.4f}")
+    print(f"    Recent Context (len={recent_context_length})                   - MAE: {mae_recent:.4f}, RMSE: {rmse_recent:.4f}, CV_unc: {np.mean(forecast_uncertainty_recent['cv_uncertainty']):.4f}")
     
     return {
         'window_id': window_id,
@@ -1048,6 +1292,21 @@ def perform_forecasting_comparison_with_uncertainty(input_data, label_data, impo
         'rmse_least_important_interp': rmse_least_important_interp,
         'forecast_errors_least_important_interp': forecast_errors_least_important_interp,
         'forecast_uncertainty_least_important_interp': forecast_uncertainty_least_important_interp,
+        # Uniform sampling results
+        'mae_uniform': mae_uniform,
+        'rmse_uniform': rmse_uniform,
+        'forecast_errors_uniform': forecast_errors_uniform,
+        'forecast_uncertainty_uniform': forecast_uncertainty_uniform,
+        # Uniform resampling results
+        'mae_uniform_resampled': mae_uniform_resampled,
+        'rmse_uniform_resampled': rmse_uniform_resampled,
+        'forecast_errors_uniform_resampled': forecast_errors_uniform_resampled,
+        'forecast_uncertainty_uniform_resampled': forecast_uncertainty_uniform_resampled,
+        # Recent context results
+        'mae_recent': mae_recent,
+        'rmse_recent': rmse_recent,
+        'forecast_errors_recent': forecast_errors_recent,
+        'forecast_uncertainty_recent': forecast_uncertainty_recent,
         # Common data
         'true_values': true_values,
         'random_indices': random_indices,
@@ -1147,7 +1406,7 @@ def create_individual_window_plots(all_importance_results, save_path=None):
 
 def create_uncertainty_comparison_plots(all_importance_results, all_forecast_results, save_path=None):
     """
-    Create enhanced uncertainty analysis plots with time series values overlay and 7 forecasting methods (V3)
+    Create enhanced uncertainty analysis plots with time series values overlay and 10 forecasting methods (V3)
     """
     fig, axes = plt.subplots(3, 3, figsize=(20, 16))
     fig.suptitle(f'Moirai Input Context Uncertainty Analysis v3 (Column: {SELECTED_COLUMN})\n'
@@ -1198,10 +1457,10 @@ def create_uncertainty_comparison_plots(all_importance_results, all_forecast_res
     ax1.tick_params(axis='y', labelcolor='red')
     ax1_twin.tick_params(axis='y', labelcolor='blue')
     
-    # 2. Seven-method forecasting performance comparison
+    # 2. Ten-method forecasting performance comparison
     ax2 = axes[0, 1]
     
-    methods = ['Full', 'Random\n75%', 'Most Imp\n75%', 'Random+\nInterp', 'MostImp+\nInterp', 'Least Imp\n75%', 'LeastImp+\nInterp']
+    methods = ['Full', f'Random\n{CONTEXT_KEEP_RATIO*100:.0f}%', f'Most Imp\n{CONTEXT_KEEP_RATIO*100:.0f}%', 'Random+\nInterp', 'MostImp+\nInterp', f'Least Imp\n{CONTEXT_KEEP_RATIO*100:.0f}%', 'LeastImp+\nInterp', 'Uniform\nSampling', 'Uniform\nResampling', 'Recent\nContext']
     mae_means = [
         np.mean([r['mae_full'] for r in all_forecast_results]),
         np.mean([r['mae_random'] for r in all_forecast_results]),
@@ -1209,7 +1468,10 @@ def create_uncertainty_comparison_plots(all_importance_results, all_forecast_res
         np.mean([r['mae_random_interp'] for r in all_forecast_results]),
         np.mean([r['mae_important_interp'] for r in all_forecast_results]),
         np.mean([r['mae_least_important'] for r in all_forecast_results]),
-        np.mean([r['mae_least_important_interp'] for r in all_forecast_results])
+        np.mean([r['mae_least_important_interp'] for r in all_forecast_results]),
+        np.mean([r['mae_uniform'] for r in all_forecast_results]),
+        np.mean([r['mae_uniform_resampled'] for r in all_forecast_results]),
+        np.mean([r['mae_recent'] for r in all_forecast_results])
     ]
     mae_stds = [
         np.std([r['mae_full'] for r in all_forecast_results]),
@@ -1218,13 +1480,16 @@ def create_uncertainty_comparison_plots(all_importance_results, all_forecast_res
         np.std([r['mae_random_interp'] for r in all_forecast_results]),
         np.std([r['mae_important_interp'] for r in all_forecast_results]),
         np.std([r['mae_least_important'] for r in all_forecast_results]),
-        np.std([r['mae_least_important_interp'] for r in all_forecast_results])
+        np.std([r['mae_least_important_interp'] for r in all_forecast_results]),
+        np.std([r['mae_uniform'] for r in all_forecast_results]),
+        np.std([r['mae_uniform_resampled'] for r in all_forecast_results]),
+        np.std([r['mae_recent'] for r in all_forecast_results])
     ]
     
-    colors_bar = ['blue', 'green', 'red', 'orange', 'purple', 'brown', 'pink']
+    colors_bar = ['blue', 'green', 'red', 'orange', 'purple', 'brown', 'pink', 'cyan', 'magenta', 'yellow']
     bars = ax2.bar(methods, mae_means, yerr=mae_stds, capsize=5, 
                    color=colors_bar, alpha=0.7)
-    ax2.set_title('Mean MAE by Method (7 Methods)', fontweight='bold')
+    ax2.set_title('Mean MAE by Method (10 Methods)', fontweight='bold')
     ax2.set_ylabel('MAE')
     ax2.tick_params(axis='x', rotation=45)
     ax2.grid(True, alpha=0.3)
@@ -1234,26 +1499,32 @@ def create_uncertainty_comparison_plots(all_importance_results, all_forecast_res
         ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
                 f'{mean_val:.3f}', ha='center', va='bottom', fontsize=9)
     
-    # 3. Method comparison over windows (all 7 methods)
+    # 3. Method comparison over windows (all 10 methods)
     ax3 = axes[0, 2]
     
     window_numbers = range(1, len(all_forecast_results) + 1)
     ax3.plot(window_numbers, [r['mae_full'] for r in all_forecast_results], 
             'o-', label='Full Context', color='blue', linewidth=2, markersize=4)
     ax3.plot(window_numbers, [r['mae_random'] for r in all_forecast_results], 
-            's-', label='Random 75%', color='green', linewidth=2, markersize=4)
+            's-', label=f'Random {CONTEXT_KEEP_RATIO*100:.0f}%', color='green', linewidth=2, markersize=4)
     ax3.plot(window_numbers, [r['mae_most_important'] for r in all_forecast_results], 
-            '^-', label='Most Imp 75%', color='red', linewidth=2, markersize=4)
+            '^-', label=f'Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%', color='red', linewidth=2, markersize=4)
     ax3.plot(window_numbers, [r['mae_random_interp'] for r in all_forecast_results], 
             'd-', label='Random+Interp', color='orange', linewidth=2, markersize=4)
     ax3.plot(window_numbers, [r['mae_important_interp'] for r in all_forecast_results], 
             'v-', label='MostImp+Interp', color='purple', linewidth=2, markersize=4)
     ax3.plot(window_numbers, [r['mae_least_important'] for r in all_forecast_results], 
-            'p-', label='Least Imp 75%', color='brown', linewidth=2, markersize=4)
+            'p-', label=f'Least Imp {CONTEXT_KEEP_RATIO*100:.0f}%', color='brown', linewidth=2, markersize=4)
     ax3.plot(window_numbers, [r['mae_least_important_interp'] for r in all_forecast_results], 
             'h-', label='LeastImp+Interp', color='pink', linewidth=2, markersize=4)
+    ax3.plot(window_numbers, [r['mae_uniform'] for r in all_forecast_results], 
+            '*-', label=f'Uniform Drop {CONTEXT_KEEP_RATIO*100:.0f}%', color='cyan', linewidth=2, markersize=4)
+    ax3.plot(window_numbers, [r['mae_uniform_resampled'] for r in all_forecast_results], 
+            'x-', label=f'Uniform+Resample {CONTEXT_KEEP_RATIO*100:.0f}%', color='magenta', linewidth=2, markersize=4)
+    ax3.plot(window_numbers, [r['mae_recent'] for r in all_forecast_results], 
+            '+-', label=f'Recent {CONTEXT_KEEP_RATIO*100:.0f}%', color='yellow', linewidth=2, markersize=4)
     
-    ax3.set_title('MAE by Window (7 Methods)', fontweight='bold')
+    ax3.set_title('MAE by Window (10 Methods)', fontweight='bold')
     ax3.set_xlabel('Window')
     ax3.set_ylabel('MAE')
     ax3.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
@@ -1316,7 +1587,7 @@ def create_uncertainty_comparison_plots(all_importance_results, all_forecast_res
     ax5.set_xlabel('Window Index')
     ax5.set_ylabel('Method')
     ax5.set_yticks(range(4))
-    ax5.set_yticklabels(['Random 75%', 'Most Imp 75%', 'Random+Interp', 'MostImp+Interp'])
+    ax5.set_yticklabels(['Random ${CONTEXT_KEEP_RATIO*100:.0f}%', 'Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%', 'Random+Interp', 'MostImp+Interp'])
     
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax5, shrink=0.8)
@@ -1427,19 +1698,19 @@ DATASET & MODEL:
 
 FORECASTING PERFORMANCE (MAE):
 • Full Context: {np.mean([r['mae_full'] for r in all_forecast_results]):.4f}
-• Random 75%: {np.mean([r['mae_random'] for r in all_forecast_results]):.4f}
-• Most Important 75%: {np.mean([r['mae_most_important'] for r in all_forecast_results]):.4f}
+• Random {CONTEXT_KEEP_RATIO*100:.0f}%: {np.mean([r['mae_random'] for r in all_forecast_results]):.4f}
+• Most Important {CONTEXT_KEEP_RATIO*100:.0f}%: {np.mean([r['mae_most_important'] for r in all_forecast_results]):.4f}
 • Random + Interpolation: {np.mean([r['mae_random_interp'] for r in all_forecast_results]):.4f}
 • Most Imp + Interpolation: {np.mean([r['mae_important_interp'] for r in all_forecast_results]):.4f}
-• Least Important 75%: {np.mean([r['mae_least_important'] for r in all_forecast_results]):.4f}
+• Least Important {CONTEXT_KEEP_RATIO*100:.0f}%: {np.mean([r['mae_least_important'] for r in all_forecast_results]):.4f}
 • Least Imp + Interpolation: {np.mean([r['mae_least_important_interp'] for r in all_forecast_results]):.4f}
 
 IMPROVEMENT vs FULL CONTEXT:
-• Random 75%: {((np.mean([r['mae_random'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
-• Most Important 75%: {((np.mean([r['mae_most_important'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
+• Random {CONTEXT_KEEP_RATIO*100:.0f}%: {((np.mean([r['mae_random'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
+• Most Important {CONTEXT_KEEP_RATIO*100:.0f}%: {((np.mean([r['mae_most_important'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
 • Random + Interp: {((np.mean([r['mae_random_interp'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
 • Most Imp + Interp: {((np.mean([r['mae_important_interp'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
-• Least Important 75%: {((np.mean([r['mae_least_important'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
+• Least Important {CONTEXT_KEEP_RATIO*100:.0f}%: {((np.mean([r['mae_least_important'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
 • Least Imp + Interp: {((np.mean([r['mae_least_important_interp'] for r in all_forecast_results]) / np.mean([r['mae_full'] for r in all_forecast_results])) - 1) * 100:+.2f}%
 
 UNCERTAINTY STATISTICS:
@@ -1706,11 +1977,8 @@ CORRELATIONS:
 
 FORECAST PERFORMANCE:
 • Mean MAE (Full): {np.mean([r['mae_full'] for r in all_forecast_results]):.4f}
-• Mean MAE (Random 75%): {np.mean([r['mae_random'] for r in all_forecast_results]):.4f}
-• Mean MAE (Most Imp 75%): {np.mean([r['mae_most_important'] for r in all_forecast_results]):.4f}
-
-IMPROVEMENT:
-• Most Imp vs Random: {((np.mean([r['mae_most_important'] for r in all_forecast_results]) / np.mean([r['mae_random'] for r in all_forecast_results])) - 1) * 100:+.2f}%
+• Mean MAE (Random {CONTEXT_KEEP_RATIO*100:.0f}%): {np.mean([r['mae_random'] for r in all_forecast_results]):.4f}
+• Mean MAE (Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%): {np.mean([r['mae_most_important'] for r in all_forecast_results]):.4f}
     """
     
     ax6.text(0.05, 0.95, summary_text, transform=ax6.transAxes, fontsize=9,
@@ -1917,28 +2185,32 @@ def create_position_focused_plots(all_importance_results, save_path=None):
 
 def create_forecasting_results_plot(all_forecast_results, save_path=None):
     """
-    Create a dedicated plot for forecasting performance comparison of all 7 methods (V3)
+    Create a dedicated plot for forecasting performance comparison of all 10 methods (V3)
     """
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle(f'Forecasting Performance Comparison (7 Methods) - V3\n'
+    fig, axes = plt.subplots(2, 2, figsize=(18, 14))
+    fig.suptitle(f'Forecasting Performance Comparison (10 Methods) - V3\n'
                 f'Model: {MODEL}-{SIZE} | Import_CTX: {INPUT_CTX} | Forecast_CTX: {CTX} | Prediction: {PDT}\n'
                 f'V3: Using {INPUT_CTX} for importance, {CTX} for forecasting', 
                 fontsize=16, fontweight='bold')
     
-    # Method names and colors
-    methods = ['Full', 'Random 75%', 'Most Imp 75%', 'Random+Interp', 
-               'MostImp+Interp', 'Least Imp 75%', 'LeastImp+Interp']
-    colors = ['blue', 'green', 'red', 'orange', 'purple', 'brown', 'pink']
+    # Method names and colors for all 10 methods
+    methods = ['Full', f'Random {CONTEXT_KEEP_RATIO*100:.0f}%', f'Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%', 'Random+Interp', 
+               'MostImp+Interp', f'Least Imp {CONTEXT_KEEP_RATIO*100:.0f}%', 'LeastImp+Interp',
+               f'Uniform Drop {CONTEXT_KEEP_RATIO*100:.0f}%', f'Uniform+Resample {CONTEXT_KEEP_RATIO*100:.0f}%', f'Recent {CONTEXT_KEEP_RATIO*100:.0f}%']
+    colors = ['blue', 'green', 'red', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
     
-    # Extract MAE values for all methods
+    # Extract MAE values for all 10 methods
     mae_data = {
         'Full': [r['mae_full'] for r in all_forecast_results],
-        'Random 75%': [r['mae_random'] for r in all_forecast_results],
-        'Most Imp 75%': [r['mae_most_important'] for r in all_forecast_results],
+        f'Random {CONTEXT_KEEP_RATIO*100:.0f}%': [r['mae_random'] for r in all_forecast_results],
+        f'Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%': [r['mae_most_important'] for r in all_forecast_results],
         'Random+Interp': [r['mae_random_interp'] for r in all_forecast_results],
         'MostImp+Interp': [r['mae_important_interp'] for r in all_forecast_results],
-        'Least Imp 75%': [r['mae_least_important'] for r in all_forecast_results],
-        'LeastImp+Interp': [r['mae_least_important_interp'] for r in all_forecast_results]
+        f'Least Imp {CONTEXT_KEEP_RATIO*100:.0f}%': [r['mae_least_important'] for r in all_forecast_results],
+        'LeastImp+Interp': [r['mae_least_important_interp'] for r in all_forecast_results],
+        f'Uniform Drop {CONTEXT_KEEP_RATIO*100:.0f}%': [r['mae_uniform'] for r in all_forecast_results],
+        f'Uniform+Resample {CONTEXT_KEEP_RATIO*100:.0f}%': [r['mae_uniform_resampled'] for r in all_forecast_results],
+        f'Recent {CONTEXT_KEEP_RATIO*100:.0f}%': [r['mae_recent'] for r in all_forecast_results]
     }
     
     # 1. Bar plot of mean MAE with error bars
@@ -2084,11 +2356,12 @@ def create_intermediate_plots(importance_results, forecast_results, results_dir,
     print(f"Intermediate plots stored in: {intermediate_dir}")
 
 # Create results directory structure
-results_base_dir = "results_v3_v3"  # Changed to v3
+results_base_dir = "results_v3_patch16"  # Changed to v3
 dataset_dir = dataset_name
 model_dir = f"{MODEL}-{SIZE}"
 context_dir = f"ctx{CTX}"
-results_dir = os.path.join(results_base_dir, dataset_dir, model_dir, context_dir)
+comp_dir = f"comp{CONTEXT_KEEP_RATIO:.2f}"
+results_dir = os.path.join(results_base_dir, dataset_dir, model_dir, context_dir, comp_dir)
 
 # Create directories if they don't exist
 os.makedirs(results_dir, exist_ok=True)
@@ -2139,8 +2412,8 @@ for window_idx, (input_data, label_data) in enumerate(zip(input_it, label_it)):
     )
     all_importance_results.append(importance_result)
     
-    # 2. Enhanced forecasting comparison with 7 methods
-    print(f"2. Performing forecasting comparison with 7 methods...")
+    # 2. Enhanced forecasting comparison with 10 methods
+    print(f"2. Performing forecasting comparison with 10 methods...")
     forecast_result = perform_forecasting_comparison_with_uncertainty(
         input_data, label_data, importance_result['ar_uncertainties'], window_idx + 1
     )
@@ -2154,12 +2427,15 @@ for window_idx, (input_data, label_data) in enumerate(zip(input_it, label_it)):
     print(f"    Mean AR error: {np.mean(importance_result['ar_errors']):.4f}")
     print(f"  Enhanced Forecasting Performance (7 Methods):")
     print(f"    Full: {forecast_result['mae_full']:.4f}")
-    print(f"    Random 75%: {forecast_result['mae_random']:.4f}")
-    print(f"    Most Imp 75%: {forecast_result['mae_most_important']:.4f}")
+    print(f"    Random {CONTEXT_KEEP_RATIO*100:.0f}%: {forecast_result['mae_random']:.4f}")
+    print(f"    Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%: {forecast_result['mae_most_important']:.4f}")
     print(f"    Random + Interp: {forecast_result['mae_random_interp']:.4f}")
     print(f"    Most Imp + Interp: {forecast_result['mae_important_interp']:.4f}")
-    print(f"    Least Imp 75%: {forecast_result['mae_least_important']:.4f}")
+    print(f"    Least Imp {CONTEXT_KEEP_RATIO*100:.0f}%: {forecast_result['mae_least_important']:.4f}")
     print(f"    Least Imp + Interp: {forecast_result['mae_least_important_interp']:.4f}")
+    print(f"    Uniform Sampling: {forecast_result['mae_uniform']:.4f}")
+    print(f"    Uniform Resampling: {forecast_result['mae_uniform_resampled']:.4f}")
+    print(f"    Recent Context: {forecast_result['mae_recent']:.4f}")
     
     # Check if we should create intermediate plots
     if ANALYSIS_FREQ is not None and (window_idx + 1) % ANALYSIS_FREQ == 0:
@@ -2194,7 +2470,7 @@ all_importance_scores = np.concatenate([result['ar_uncertainties'] for result in
 all_ar_cv_uncertainties = np.concatenate([result['ar_cv_uncertainties'] for result in all_importance_results])
 all_ar_errors = np.concatenate([result['ar_errors'] for result in all_importance_results])
 
-# Extract results for all 7 methods
+# Extract results for all 10 methods
 all_mae_full = np.array([result['mae_full'] for result in all_forecast_results])
 all_mae_random = np.array([result['mae_random'] for result in all_forecast_results])
 all_mae_most_important = np.array([result['mae_most_important'] for result in all_forecast_results])
@@ -2202,44 +2478,60 @@ all_mae_random_interp = np.array([result['mae_random_interp'] for result in all_
 all_mae_important_interp = np.array([result['mae_important_interp'] for result in all_forecast_results])
 all_mae_least_important = np.array([result['mae_least_important'] for result in all_forecast_results])
 all_mae_least_important_interp = np.array([result['mae_least_important_interp'] for result in all_forecast_results])
+all_mae_uniform = np.array([result['mae_uniform'] for result in all_forecast_results])
+all_mae_uniform_resampled = np.array([result['mae_uniform_resampled'] for result in all_forecast_results])
+all_mae_recent = np.array([result['mae_recent'] for result in all_forecast_results])
 
 print(f"Total samples analyzed (AR uncertainty): {len(all_ar_cv_uncertainties)}")
 print(f"Total windows processed: {len(all_importance_results)}")
 
 # Enhanced performance statistics
-print(f"\nEnhanced Forecasting Statistics (7 Methods):")
+print(f"\nEnhanced Forecasting Statistics (10 Methods):")
 print(f"Full Context:")
 print(f"  Mean MAE: {np.mean(all_mae_full):.4f} ± {np.std(all_mae_full):.4f}")
 
-print(f"Random 75% Context:")
+print(f"Random {CONTEXT_KEEP_RATIO*100:.0f}% Context:")
 print(f"  Mean MAE: {np.mean(all_mae_random):.4f} ± {np.std(all_mae_random):.4f}")
 print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_random)) / np.mean(all_mae_full)) * 100:+.2f}%")
 
-print(f"Most Important 75% Context:")
+print(f"Most Important {CONTEXT_KEEP_RATIO*100:.0f}% Context:")
 print(f"  Mean MAE: {np.mean(all_mae_most_important):.4f} ± {np.std(all_mae_most_important):.4f}")
 print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_most_important)) / np.mean(all_mae_full)) * 100:+.2f}%")
 
-print(f"Random 75% + Interpolation:")
+print(f"Random {CONTEXT_KEEP_RATIO*100:.0f}% + Interpolation:")
 print(f"  Mean MAE: {np.mean(all_mae_random_interp):.4f} ± {np.std(all_mae_random_interp):.4f}")
 print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_random_interp)) / np.mean(all_mae_full)) * 100:+.2f}%")
 
-print(f"Most Important 75% + Interpolation:")
+print(f"Most Important {CONTEXT_KEEP_RATIO*100:.0f}% + Interpolation:")
 print(f"  Mean MAE: {np.mean(all_mae_important_interp):.4f} ± {np.std(all_mae_important_interp):.4f}")
 print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_important_interp)) / np.mean(all_mae_full)) * 100:+.2f}%")
 
-print(f"Least Important 75% Context:")
+print(f"Least Important {CONTEXT_KEEP_RATIO*100:.0f}% Context:")
 print(f"  Mean MAE: {np.mean(all_mae_least_important):.4f} ± {np.std(all_mae_least_important):.4f}")
 print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_least_important)) / np.mean(all_mae_full)) * 100:+.2f}%")
 
-print(f"Least Important 75% + Interpolation:")
+print(f"Least Important {CONTEXT_KEEP_RATIO*100:.0f}% + Interpolation:")
 print(f"  Mean MAE: {np.mean(all_mae_least_important_interp):.4f} ± {np.std(all_mae_least_important_interp):.4f}")
 print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_least_important_interp)) / np.mean(all_mae_full)) * 100:+.2f}%")
 
+print(f"Uniform Sampling {CONTEXT_KEEP_RATIO*100:.0f}%:")
+print(f"  Mean MAE: {np.mean(all_mae_uniform):.4f} ± {np.std(all_mae_uniform):.4f}")
+print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_uniform)) / np.mean(all_mae_full)) * 100:+.2f}%")
+
+print(f"Uniform Resampling {CONTEXT_KEEP_RATIO*100:.0f}%:")
+print(f"  Mean MAE: {np.mean(all_mae_uniform_resampled):.4f} ± {np.std(all_mae_uniform_resampled):.4f}")
+print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_uniform_resampled)) / np.mean(all_mae_full)) * 100:+.2f}%")
+
+print(f"Recent Context {CONTEXT_KEEP_RATIO*100:.0f}%:")
+print(f"  Mean MAE: {np.mean(all_mae_recent):.4f} ± {np.std(all_mae_recent):.4f}")
+print(f"  Improvement vs Full: {((np.mean(all_mae_full) - np.mean(all_mae_recent)) / np.mean(all_mae_full)) * 100:+.2f}%")
+
 # Method ranking
-method_names = ['Full', 'Random 75%', 'Most Imp 75%', 'Random+Interp', 'MostImp+Interp', 'Least Imp 75%', 'LeastImp+Interp']
+method_names = ['Full', f'Random {CONTEXT_KEEP_RATIO*100:.0f}%', f'Most Imp {CONTEXT_KEEP_RATIO*100:.0f}%', 'Random+Interp', 'MostImp+Interp', f'Least Imp {CONTEXT_KEEP_RATIO*100:.0f}%', 'LeastImp+Interp', 'Uniform Sampling', 'Uniform Resampling', 'Recent Context']
 method_maes = [np.mean(all_mae_full), np.mean(all_mae_random), np.mean(all_mae_most_important), 
                np.mean(all_mae_random_interp), np.mean(all_mae_important_interp),
-               np.mean(all_mae_least_important), np.mean(all_mae_least_important_interp)]
+               np.mean(all_mae_least_important), np.mean(all_mae_least_important_interp),
+               np.mean(all_mae_uniform), np.mean(all_mae_uniform_resampled), np.mean(all_mae_recent)]
 
 ranking_indices = np.argsort(method_maes)
 print(f"\nMethod Ranking (Best to Worst):")
@@ -2254,13 +2546,17 @@ results_summary = {
     'all_ar_cv_uncertainties': all_ar_cv_uncertainties,
     'all_ar_errors': all_ar_errors,
     
-    # All 7 methods MAE
+    # All 10 methods MAE
     'all_mae_full': all_mae_full,
     'all_mae_random': all_mae_random,
     'all_mae_most_important': all_mae_most_important,
     'all_mae_random_interp': all_mae_random_interp,
     'all_mae_important_interp': all_mae_important_interp,
     'all_mae_least_important': all_mae_least_important,
+    'all_mae_least_important_interp': all_mae_least_important_interp,
+    'all_mae_uniform': all_mae_uniform,
+    'all_mae_uniform_resampled': all_mae_uniform_resampled,
+    'all_mae_recent': all_mae_recent,
     'all_mae_least_important_interp': all_mae_least_important_interp,
     
     # Method ranking
@@ -2297,7 +2593,7 @@ print(f"\nEnhanced Processing Summary (V3):")
 print(f"  • V3 Logic: Always using most recent {INPUT_CTX} samples as context for importance measurement")
 print(f"  • Forecasting using context length: {CTX}")
 print(f"  • Analysis Frequency: {ANALYSIS_FREQ if ANALYSIS_FREQ else 'Final only'}")
-print(f"  • Processed {len(all_importance_results)} windows with 7 forecasting methods")
+print(f"  • Processed {len(all_importance_results)} windows with 10 forecasting methods")
 print(f"  • Analyzed {len(all_ar_cv_uncertainties)} AR steps for uncertainty")
 print(f"  • Created detailed plots: uncertainty_analysis.png + individual_window_plots.png + forecasting_results_comparison.png")
 if ANALYSIS_FREQ is not None:
