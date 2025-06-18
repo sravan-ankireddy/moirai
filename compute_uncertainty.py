@@ -24,7 +24,7 @@ PDT_LIST = [8]        # List of prediction lengths to test
 PSZ_LIST = ["auto", 1, 8, 16, 32, 64, 128]    # List of patch sizes to test
 BSZ = 64                    # Batch size
 GPU = 1                       # GPU device
-TEST_LENGTH = 10              # Test set length
+TEST_LENGTH = 100              # Test set length
 
 # Data configuration
 CSV_PATH = "/home/sa53869/time-series/moirai/time-moe-eval/synthetic_sinusoidal.csv"
