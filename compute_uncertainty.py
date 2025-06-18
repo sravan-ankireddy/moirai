@@ -19,10 +19,10 @@ from uni2ts.model.moirai import MoiraiForecast, MoiraiModule
 # Configuration
 MODEL = "moirai"  # or "moirai-moe"
 SIZE = "large"    # small, base, large
-CTX_LIST = [64, 256, 512, 1024]     # List of context lengths to test
+CTX_LIST = [64, 128, 256, 512, 1024]     # List of context lengths to test
 PDT_LIST = [8]        # List of prediction lengths to test
 PSZ_LIST = ["auto", 1, 8, 16, 32, 64, 128]    # List of patch sizes to test
-BSZ = 128                     # Batch size
+BSZ = 64                    # Batch size
 GPU = 1                       # GPU device
 TEST_LENGTH = 10              # Test set length
 
@@ -67,6 +67,49 @@ all_results = []
 # Loop through all configurations
 total_configs = len(CTX_LIST) * len(PDT_LIST) * len(PSZ_LIST)
 config_count = 0
+
+
+# Function to create and update summary plot
+def create_summary_plot(all_results, dataset_name, model_name, size_name, save_dir):
+    """Create and save the summary MAE comparison plot with current results"""
+    if not all_results:
+        return
+    
+    config_names = [r['config_name'] for r in all_results]
+    mae_values = [r['mae'] for r in all_results]
+    
+    # Calculate standard errors for error bars
+    mae_std_errors = []
+    for result in all_results:
+        individual_maes = [sample['mae'] for sample in result['sample_results']]
+        std_error = np.std(individual_maes) / np.sqrt(len(individual_maes))  # Standard error of the mean
+        mae_std_errors.append(std_error)
+    
+    plt.figure(figsize=(15, 8))
+    bars = plt.bar(range(len(config_names)), mae_values, 
+                   yerr=mae_std_errors,  # Add error bars
+                   capsize=5,  # Error bar cap size
+                   error_kw={'elinewidth': 2, 'capthick': 2},  # Error bar styling
+                   color=['steelblue', 'forestgreen', 'firebrick', 'darkorange', 'purple', 'brown', 'hotpink', 'gray', 'olive'][:len(config_names)])
+    
+    # Add MAE values on top of each bar (adjust position to account for error bars)
+    for i, (bar, mae, std_err) in enumerate(zip(bars, mae_values, mae_std_errors)):
+        plt.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + std_err + 0.001, 
+                 f'{mae:.4f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    plt.xlabel('Configuration (Context_Prediction_PatchSize)', fontsize=12)
+    plt.ylabel('Mean Absolute Error (MAE)', fontsize=12)
+    plt.title(f'Mean Absolute Error Comparison - {len(all_results)} Configurations Tested\nModel: {model_name}-{size_name} | Dataset: {dataset_name}', fontsize=14)
+    plt.xticks(range(len(config_names)), config_names, rotation=45, ha='right')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    
+    # Save summary comparison plot
+    summary_filename = f"{save_dir}/summary_mae_comparison.png"
+    os.makedirs(os.path.dirname(summary_filename), exist_ok=True)
+    plt.savefig(summary_filename, dpi=300, bbox_inches='tight')
+    plt.show()
+    return summary_filename
 
 for CTX in CTX_LIST:
     for PDT in PDT_LIST:
@@ -211,48 +254,22 @@ for CTX in CTX_LIST:
             })
             
             print(f"Configuration MAE: {config_mae:.4f}")
+            
+            # Update summary plot after each configuration
+            main_results_dir = f"results_uncertainty/{dataset_name}/{MODEL}-{SIZE}"
+            print(f"Updating summary plot with {len(all_results)} configurations...")
+            summary_file = create_summary_plot(all_results, dataset_name, MODEL, SIZE, main_results_dir)
+            print(f"Updated summary plot: {summary_file}")
 
 print(f"\n{'='*60}")
 print("ALL CONFIGURATIONS TESTED SUCCESSFULLY")
 print(f"{'='*60}")
 
-# Create summary comparison plot
-print("Creating MAE comparison plot...")
-config_names = [r['config_name'] for r in all_results]
-mae_values = [r['mae'] for r in all_results]
-
-# Calculate standard errors for error bars
-mae_std_errors = []
-for result in all_results:
-    individual_maes = [sample['mae'] for sample in result['sample_results']]
-    std_error = np.std(individual_maes) / np.sqrt(len(individual_maes))  # Standard error of the mean
-    mae_std_errors.append(std_error)
-
-plt.figure(figsize=(15, 8))
-bars = plt.bar(range(len(config_names)), mae_values, 
-               yerr=mae_std_errors,  # Add error bars
-               capsize=5,  # Error bar cap size
-               error_kw={'elinewidth': 2, 'capthick': 2},  # Error bar styling
-               color=['steelblue', 'forestgreen', 'firebrick', 'darkorange', 'purple', 'brown', 'hotpink', 'gray', 'olive'][:len(config_names)])
-
-# Add MAE values on top of each bar (adjust position to account for error bars)
-for i, (bar, mae, std_err) in enumerate(zip(bars, mae_values, mae_std_errors)):
-    plt.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + std_err + 0.001, 
-             f'{mae:.4f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
-
-plt.xlabel('Configuration (Context_Prediction_PatchSize)', fontsize=12)
-plt.ylabel('Mean Absolute Error (MAE)', fontsize=12)
-plt.title(f'Mean Absolute Error Comparison Across All Configurations\nModel: {MODEL}-{SIZE} | Dataset: {dataset_name}', fontsize=14)
-plt.xticks(range(len(config_names)), config_names, rotation=45, ha='right')
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-plt.tight_layout()
-
-# Save summary comparison plot
-summary_filename = f"results_uncertainty/{dataset_name}/{MODEL}-{SIZE}/summary_mae_comparison.png"
-os.makedirs(os.path.dirname(summary_filename), exist_ok=True)
-plt.savefig(summary_filename, dpi=300, bbox_inches='tight')
-plt.show()
-print(f"Summary plot saved: {summary_filename}")
+# Final summary plot (redundant now, but kept for completeness)
+print("Creating final MAE comparison plot...")
+main_results_dir = f"results_uncertainty/{dataset_name}/{MODEL}-{SIZE}"
+final_summary_file = create_summary_plot(all_results, dataset_name, MODEL, SIZE, main_results_dir)
+print(f"Final summary plot saved: {final_summary_file}")
 
 # Print detailed results table
 print(f"\n{'='*60}")
