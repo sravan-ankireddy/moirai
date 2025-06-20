@@ -16,13 +16,16 @@ from uni2ts.model.moirai import MoiraiForecast, MoiraiModule
 # Configuration
 MODEL = "moirai"  # or "moirai-moe"
 SIZE = "large"    # small, base, large
-CTX = 256          # Context length
-PDT = 8           # Prediction length
+CTX = 2048          # Context length
+PDT = 64           # Prediction length
 BSZ = 32          # Batch size
 GPU = 2           # GPU device
 PSZ = "auto"
-PSZ_uncertainty = "auto"
-compression_ratio = 0.5
+PSZ_surprisal = "auto"
+compression_ratio = 1/2 # 1/2, 1/4, 1/8, etc.
+
+# Control flags
+ENABLE_SURPRISAL = False  # Set to False to skip slow self-information computation and surprisal-based methods
 
 # Data configuration
 HOME = os.path.expanduser("~")
@@ -33,14 +36,14 @@ MODEL_FOLDER = "Salesforce"
 CSV_PATH = f"{DATASET_FOLDER}/synthetic_sinusoidal.csv"
 # CSV_PATH = f"{DATASET_FOLDER}/electricity.csv"
 
-COLUMN = 2        # Column to analyze (0-indexed)
+COLUMN = 0        # Column to analyze (0-indexed)
 
 # Load Moirai model
 print("Loading Moirai model...")
 base_module = MoiraiModule.from_pretrained(f"{MODEL_FOLDER}/{MODEL}-1.0-R-{SIZE}")
 
 # Test configuration
-NUM_WINDOWS = 1000  # Test set length
+NUM_WINDOWS = 100  # Test set length
 TEST_SAMPLES = int(NUM_WINDOWS * PDT)  # Number of test samples
 NUM_SAMPLES = 1000  # Number of samples for probabilistic forecasting
 
@@ -71,7 +74,7 @@ print(f"Data preview:")
 print(df_selected.head())
 
 # Create results directory
-results_dir = f"results_prune_si/{dataset_name}_COL_{COLUMN}/{MODEL}-{SIZE}/CTX{CTX}_PDT{PDT}_PSZ{PSZ}/M_{NUM_SAMPLES}"
+results_dir = f"results_prune_si_v2/{dataset_name}_COL_{COLUMN}/{MODEL}-{SIZE}/CTX{CTX}_PDT{PDT}_PSZ{PSZ}_COMP{compression_ratio}/N_{NUM_SAMPLES}"
 os.makedirs(results_dir, exist_ok=True)
 print(f"Results will be saved to: {results_dir}")
 
@@ -104,7 +107,7 @@ model = MoiraiForecast(
 
 # Create model with reduced context length AND reduced prediction length
 reduced_ctx = int(compression_ratio * CTX)
-reduced_pdt = max(1, PDT // 2)  # Ensure at least 1 prediction step
+reduced_pdt = max(1, int(compression_ratio * PDT))  # Ensure at least 1 prediction step
 model_reduced_ctx_pdt = MoiraiForecast(
     module=base_module,
     prediction_length=reduced_pdt,
@@ -234,6 +237,47 @@ for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data_downs
         'mae': np.mean(np.abs(prediction_upsampled - ground_truth))  # MAE against full ground truth
     })
 
+# NEW EXPERIMENT: Direct downsampling of ground truth labels (no resampling of forecast)
+# This uses the existing downsampled prediction and compares with downsampled ground truth
+print("\nProcessing direct downsampled ground truth experiment...")
+sample_results_direct_downsample = []
+
+for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data_downsampled, label_data, forecasts_downsampled), desc="Processing direct downsample results", total=len(input_data_downsampled))):
+    # Get context data
+    context = input_item['target']
+    
+    # keep the last `reduced_ctx` values for context
+    if len(context) > reduced_ctx:
+        context = context[-reduced_ctx:]
+
+    # Get full ground truth
+    full_ground_truth = label_item['target'][:PDT]
+    
+    # Get prediction (mean of samples) - this is the reduced_pdt length prediction
+    prediction_downsampled = np.mean(forecast.samples, axis=0)
+    
+    # Downsample ground truth to match the prediction length
+    # Use the same downsampling approach as the context downsampling
+    downsample_step = int(1 / compression_ratio)
+    downsampled_ground_truth = full_ground_truth[::downsample_step][:reduced_pdt]
+    
+    # Calculate MAE on the downsampled data directly
+    downsampled_mae = np.mean(np.abs(prediction_downsampled - downsampled_ground_truth))
+    
+    # Store results
+    sample_results_direct_downsample.append({
+        'window_id': i,
+        'context': context,
+        'ground_truth': full_ground_truth,  # Store full GT for visualization
+        'downsampled_ground_truth': downsampled_ground_truth,  # Downsampled GT
+        'prediction_downsampled': prediction_downsampled,  # Downsampled prediction
+        'mae': downsampled_mae,  # MAE on downsampled data
+        'downsample_step': downsample_step,  # Store for plotting
+        'reduced_pdt': reduced_pdt  # Store for plotting
+    })
+
+print(f"Processed {len(sample_results_direct_downsample)} direct downsample samples")
+
 # create a new input data with values replaced by 0 and then refilled using interpolation
 # This maintains the original context length but tests robustness to missing data
 print("\nPreparing interpolated context data...")
@@ -334,15 +378,15 @@ for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data, labe
 # All done
 print("Inference and processing complete!")
 
+if ENABLE_SURPRISAL:
+    # Implement surprisal-based pruning methods
+    # Method 1: Drop least important 50% of samples (shorter context)
+    # Method 2: Replace least important 50% with interpolation (original length)
 
-# Implement surprisal-based pruning methods
-# Method 1: Drop least important 50% of samples (shorter context)
-# Method 2: Replace least important 50% with interpolation (original length)
-
-print("\n" + "="*60)
-print("IMPLEMENTING SURPRISAL-BASED PRUNING METHODS")
-print("Using surprisal (self-information) under Gaussian assumption as importance score")
-print("="*60)
+    print("\n" + "="*60)
+    print("IMPLEMENTING SURPRISAL-BASED PRUNING METHODS")
+    print("Using surprisal (self-information) under Gaussian assumption as importance score")
+    print("="*60)
 
 # First, create the autoregressive model needed for surprisal computation
 print("Creating autoregressive model for surprisal computation...")
@@ -350,7 +394,7 @@ model_ar = MoiraiForecast(
     module=base_module,
     prediction_length=1,  # Single-step predictions
     context_length=CTX,
-    patch_size=PSZ_uncertainty,
+    patch_size=PSZ_surprisal,
     num_samples=NUM_SAMPLES,
     target_dim=1,
     feat_dynamic_real_dim=ds.num_feat_dynamic_real,
@@ -360,15 +404,15 @@ model_ar = MoiraiForecast(
 predictor_ar = model_ar.create_predictor(batch_size=BSZ)
 print("Autoregressive predictor created successfully!")
 
-def compute_uncertainty(input_data_context, predictor_ar):
+def compute_surprisal(input_data_context, predictor_ar):
     """
-    Compute uncertainty/importance for each position in the context windows using surprisal.
-    Higher surprisal (uncertainty) = higher importance.
+    Compute surprisal/importance for each position in the context windows using surprisal.
+    Higher surprisal (surprisal) = higher importance.
     
     For each position, we:
     1. Fit a Gaussian to the model's prediction samples
     2. Compute the surprisal (self-information) of the true value under this Gaussian
-    3. Use surprisal as the uncertainty/importance score
+    3. Use surprisal as the surprisal/importance score
     
     Surprisal of value x under Gaussian N(μ, σ²):
     surprisal(x) = -log(p(x)) = log(√(2πσ²)) + (x-μ)²/(2σ²)
@@ -378,14 +422,14 @@ def compute_uncertainty(input_data_context, predictor_ar):
         predictor_ar: Autoregressive predictor for single-step predictions
 
     Returns:
-        uncertainty_scores: Array of surprisal scores for each position
+        surprisal_scores: Array of surprisal scores for each position
         predictions_mean: Array of prediction means for each position
     """
     # Get predictions for all context windows
     forecasts_ar = list(tqdm(predictor_ar.predict(input_data_context), desc="Main forecasts", total=len(input_data_context)))
 
-    # Compute surprisal-based uncertainty and store predictions for each position
-    uncertainty_scores = []
+    # Compute surprisal-based surprisal and store predictions for each position
+    surprisal_scores = []
     predictions_mean = []
     
     for i, forecast in enumerate(forecasts_ar):
@@ -416,177 +460,187 @@ def compute_uncertainty(input_data_context, predictor_ar):
             squared_error_term = (true_value - mean_pred)**2 / (2 * epsilon**2)
             surprisal = log_normalizer + squared_error_term
         
-        uncertainty_scores.append(surprisal)
+        surprisal_scores.append(surprisal)
         predictions_mean.append(mean_pred)
 
-    return np.array(uncertainty_scores), np.array(predictions_mean)
+    return np.array(surprisal_scores), np.array(predictions_mean)
 
-# Compute uncertainty for all samples in the test data, so that we can use it for pruning of any context (subset)
-# Extract the CTX+TEST_SAMPLES 
-_, test_template_uncertainty = split(ds, offset=-(CTX+TEST_SAMPLES))
-test_data_uncertainty = test_template_uncertainty.generate_instances(
-    prediction_length=1,
-    windows=CTX+TEST_SAMPLES,
-    distance=1,
-)
-input_data_uncertainty = list(test_data_uncertainty.input)
+if ENABLE_SURPRISAL:
+    # Compute surprisal for all samples in the test data, so that we can use it for pruning of any context (subset)
+    # Extract the CTX+TEST_SAMPLES 
+    _, test_template_surprisal = split(ds, offset=-(CTX+TEST_SAMPLES))
+    test_data_surprisal = test_template_surprisal.generate_instances(
+        prediction_length=1,
+        windows=CTX+TEST_SAMPLES,
+        distance=1,
+    )
+    input_data_surprisal = list(test_data_surprisal.input)
 
-print("Computing surprisal scores for union of all samples in all context windows...")
-uncertainty_map, predictions_map = compute_uncertainty(input_data_uncertainty, predictor_ar)
+    print("Computing surprisal scores for union of all samples in all context windows...")
+    surprisal_map, predictions_map = compute_surprisal(input_data_surprisal, predictor_ar)
 
-# Method 1: Surprisal-based pruning (drop least important 50%)
-print("\nMethod 1: Surprisal-based pruning (drop least important 50%)")
+    # Method 1: Surprisal-based pruning (drop least important 50%)
+    print("\nMethod 1: Surprisal-based pruning (drop least important 50%)")
 
-# Dictionary to store uncertainty data for selected samples for later plotting
-selected_samples_data = {}
+    # Dictionary to store surprisal data for selected samples for later plotting
+    selected_samples_data = {}
 
-input_data_uncertainty_short = []
-for j, input_item in enumerate(tqdm(input_data, desc="Processing uncertainty-based short context")):
-    # Get the last CTX samples for uncertainty computation
-    original_target = input_item['target']
-    
-    # Take the last CTX samples
-    last_ctx_samples = original_target[-CTX:]
-
-    map_start = j*PDT
-    map_end = map_start + CTX
-
-    uncertainty_scores = uncertainty_map[map_start:map_end]
-    prediction_means = predictions_map[map_start:map_end]
-
-    # Store uncertainty data for the first few samples for later plotting
-    current_idx = len(input_data_uncertainty_short)  # Get current sample index
-    if current_idx < 10:  # Store data for first 10 samples
-        # Calculate signal deltas: delta[i] = x[i] - x[i-1], delta[0] = 0
-        signal_deltas = np.zeros(CTX)
-        signal_deltas[1:] = np.diff(last_ctx_samples)  # delta[i] = x[i] - x[i-1]
+    input_data_surprisal_short = []
+    for j, input_item in enumerate(tqdm(input_data, desc="Processing surprisal-based short context")):
+        # Get the last CTX samples for surprisal computation
+        original_target = input_item['target']
         
-        selected_samples_data[current_idx] = {
-            'signal': last_ctx_samples.copy(),
-            'uncertainty': uncertainty_scores.copy(), 
-            'delta': signal_deltas.copy(),
-            'predictions': prediction_means.copy()  # Store predictions for visualization
-        }
-    
-    # Select top 50% most important (highest uncertainty) samples
-    num_keep = reduced_ctx  # Use reduced_ctx instead of CTX//2 for consistency
-    important_indices = np.argsort(uncertainty_scores)[-num_keep:]  # Get indices of highest uncertainty
-    important_indices = np.sort(important_indices)  # Keep them in order
-    
-    # Create pruned context with only important samples - no padding!
-    unc_context = last_ctx_samples[important_indices]
-    
-    # Create new input item with reduced context
-    pruned_item = input_item.copy()
-    pruned_item['target'] = unc_context
-    input_data_uncertainty_short.append(pruned_item)
+        # Take the last CTX samples
+        last_ctx_samples = original_target[-CTX:]
 
-print(f"Created {len(input_data_uncertainty_short)} inputs with uncertainty-based pruning (short context)")
+        map_start = j*PDT
+        map_end = map_start + CTX
 
-# Method 2: Surprisal-based pruning with interpolation (original CTX length)
-print("\nMethod 2: Surprisal-based pruning with interpolation (original CTX length)")
+        surprisal_scores = surprisal_map[map_start:map_end]
+        prediction_means = predictions_map[map_start:map_end]
 
-input_data_uncertainty_interpolated = []
-for j, input_item in enumerate(tqdm(input_data, desc="Processing uncertainty-based short context")):
-    # Get the last 2*CTX samples for uncertainty computation
-    original_target = input_item['target']
+        # Store surprisal data for the first few samples for later plotting
+        current_idx = len(input_data_surprisal_short)  # Get current sample index
+        if current_idx < 10:  # Store data for first 10 samples
+            # Calculate signal deltas: delta[i] = x[i] - x[i-1], delta[0] = 0
+            signal_deltas = np.zeros(CTX)
+            signal_deltas[1:] = np.diff(last_ctx_samples)  # delta[i] = x[i] - x[i-1]
+            
+            selected_samples_data[current_idx] = {
+                'signal': last_ctx_samples.copy(),
+                'surprisal': surprisal_scores.copy(), 
+                'delta': signal_deltas.copy(),
+                'predictions': prediction_means.copy()  # Store predictions for visualization
+            }
+        
+        # Select top 50% most important (highest surprisal) samples
+        num_keep = reduced_ctx  # Use reduced_ctx instead of CTX//2 for consistency
+        important_indices = np.argsort(surprisal_scores)[-num_keep:]  # Get indices of highest surprisal
+        important_indices = np.sort(important_indices)  # Keep them in order
+        
+        # Create pruned context with only important samples - no padding!
+        unc_context = last_ctx_samples[important_indices]
+        
+        # Create new input item with reduced context
+        pruned_item = input_item.copy()
+        pruned_item['target'] = unc_context
+        input_data_surprisal_short.append(pruned_item)
 
-    # Compute uncertainty for the last CTX samples
-    last_ctx_samples = original_target[-CTX:]  # Only analyze the last CTX samples
-    
-    map_start = j*PDT
-    map_end = map_start + CTX
+    print(f"Created {len(input_data_surprisal_short)} inputs with surprisal-based pruning (short context)")
 
-    uncertainty_scores = uncertainty_map[map_start:map_end]
-    prediction_means = predictions_map[map_start:map_end]
-    
-    # Replace least important 50% samples with interpolated values
-    num_replace = CTX // 2
-    least_important_indices = np.argsort(uncertainty_scores)[:num_replace]  # Get indices of lowest uncertainty
-    
-    # Create interpolated context
-    unc_interpolated_context = last_ctx_samples.copy()
-    
-    # Create mask for interpolation
-    unc_interpolated_mask = np.zeros(CTX, dtype=bool)
-    unc_interpolated_mask[least_important_indices] = True
-    
-    # Set least important values to zero temporarily
-    target_with_missing = unc_interpolated_context.copy()
-    target_with_missing[least_important_indices] = 0
-    
-    # Interpolate the missing values
-    valid_mask = ~unc_interpolated_mask
-    valid_indices = np.where(valid_mask)[0]
-    valid_values = unc_interpolated_context[valid_mask]
-    
-    if len(valid_indices) > 1:  # Need at least 2 points for interpolation
-        all_indices = np.arange(CTX)
-        unc_interpolated_context = np.interp(all_indices, valid_indices, valid_values)
-    # If we have too few valid points, keep the original values
-    
-    # Create new input item
-    interpolated_item = input_item.copy()
-    interpolated_item['target'] = unc_interpolated_context
-    input_data_uncertainty_interpolated.append(interpolated_item)
+    # Method 2: Surprisal-based pruning with interpolation (original CTX length)
+    print("\nMethod 2: Surprisal-based pruning with interpolation (original CTX length)")
 
-print(f"Created {len(input_data_uncertainty_interpolated)} inputs with surprisal-based interpolation")
+    input_data_surprisal_interpolated = []
+    for j, input_item in enumerate(tqdm(input_data, desc="Processing surprisal-based short context")):
+        # Get the last 2*CTX samples for surprisal computation
+        original_target = input_item['target']
 
-# Run inference with surprisal-based pruning methods
-print("\nRunning inference with surprisal-based pruning methods...")
+        # Compute surprisal for the last CTX samples
+        last_ctx_samples = original_target[-CTX:]  # Only analyze the last CTX samples
+        
+        map_start = j*PDT
+        map_end = map_start + CTX
 
-print("Running predictions with surprisal-based short context...")
-forecasts_uncertainty_short = list(tqdm(predictor_reduced_ctx.predict(input_data_uncertainty_short), desc="Surprisal short forecasts", total=len(input_data_uncertainty_short)))
+        surprisal_scores = surprisal_map[map_start:map_end]
+        prediction_means = predictions_map[map_start:map_end]
+        
+        # Replace least important 50% samples with interpolated values
+        num_replace = CTX // 2
+        least_important_indices = np.argsort(surprisal_scores)[:num_replace]  # Get indices of lowest surprisal
+        
+        # Create interpolated context
+        unc_interpolated_context = last_ctx_samples.copy()
+        
+        # Create mask for interpolation
+        unc_interpolated_mask = np.zeros(CTX, dtype=bool)
+        unc_interpolated_mask[least_important_indices] = True
+        
+        # Set least important values to zero temporarily
+        target_with_missing = unc_interpolated_context.copy()
+        target_with_missing[least_important_indices] = 0
+        
+        # Interpolate the missing values
+        valid_mask = ~unc_interpolated_mask
+        valid_indices = np.where(valid_mask)[0]
+        valid_values = unc_interpolated_context[valid_mask]
+        
+        if len(valid_indices) > 1:  # Need at least 2 points for interpolation
+            all_indices = np.arange(CTX)
+            unc_interpolated_context = np.interp(all_indices, valid_indices, valid_values)
+        # If we have too few valid points, keep the original values
+        
+        # Create new input item
+        interpolated_item = input_item.copy()
+        interpolated_item['target'] = unc_interpolated_context
+        input_data_surprisal_interpolated.append(interpolated_item)
 
-print("Running predictions with surprisal-based interpolation...")
-forecasts_uncertainty_interpolated = list(tqdm(predictor.predict(input_data_uncertainty_interpolated), desc="Surprisal interpolated forecasts", total=len(input_data_uncertainty_interpolated)))
+    print(f"Created {len(input_data_surprisal_interpolated)} inputs with surprisal-based interpolation")
 
-print(f"Generated {len(forecasts_uncertainty_short)} surprisal-based short forecasts")
-print(f"Generated {len(forecasts_uncertainty_interpolated)} surprisal-based interpolated forecasts")
+    # Run inference with surprisal-based pruning methods
+    print("\nRunning inference with surprisal-based pruning methods...")
 
-# Process results
-print("\nProcessing surprisal-based pruning results...")
+    print("Running predictions with surprisal-based short context...")
+    forecasts_surprisal_short = list(tqdm(predictor_reduced_ctx.predict(input_data_surprisal_short), desc="Surprisal short forecasts", total=len(input_data_surprisal_short)))
 
-# Method 1: Surprisal-based short results
-sample_results_uncertainty_short = []
-for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data_uncertainty_short, label_data, forecasts_uncertainty_short), desc="Processing uncertainty short results", total=len(input_data_uncertainty_short))):
-    context = input_item['target']
-    ground_truth = label_item['target'][:PDT]
-    
-    # Get prediction (mean of samples) - this is now length reduced_pdt
-    prediction_reduced = np.mean(forecast.samples, axis=0)
-    
-    sample_results_uncertainty_short.append({
-        'window_id': i,
-        'context': context,
-        'ground_truth': ground_truth,
-        'prediction': prediction_upsampled,  # Upsampled prediction for MAE calculation
-        'prediction_reduced': prediction_truncated,  # Original reduced prediction
-        'reduced_pdt': reduced_pdt,  # Store reduced prediction length for plotting
-        'mae': np.mean(np.abs(prediction_upsampled - ground_truth))  # MAE against full ground truth
-    })
+    print("Running predictions with surprisal-based interpolation...")
+    forecasts_surprisal_interpolated = list(tqdm(predictor.predict(input_data_surprisal_interpolated), desc="Surprisal interpolated forecasts", total=len(input_data_surprisal_interpolated)))
 
-# Method 2: Surprisal-based interpolated results (unchanged)
-sample_results_uncertainty_interpolated = []
-for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data_uncertainty_interpolated, label_data, forecasts_uncertainty_interpolated), desc="Processing uncertainty interpolated results", total=len(input_data_uncertainty_interpolated))):
-    context = input_item['target']
-    ground_truth = label_item['target'][:PDT]
-    prediction = np.mean(forecast.samples, axis=0)
-    
-    # Store interpolation mask if available
-    interpolated_mask = np.zeros(len(context), dtype=bool)  # Default to no interpolation
-    
-    sample_results_uncertainty_interpolated.append({
-        'window_id': i,
-        'context': context,
-        'ground_truth': ground_truth,
-        'prediction': prediction,
-        'mae': np.mean(np.abs(prediction - ground_truth)),
-        'interpolated_mask': interpolated_mask
-    })
+    print(f"Generated {len(forecasts_surprisal_short)} surprisal-based short forecasts")
+    print(f"Generated {len(forecasts_surprisal_interpolated)} surprisal-based interpolated forecasts")
 
-print(f"Processed {len(sample_results_uncertainty_short)} surprisal-based short samples")
-print(f"Processed {len(sample_results_uncertainty_interpolated)} surprisal-based interpolated samples")
+    # Process results
+    print("\nProcessing surprisal-based pruning results...")
+
+    # Method 1: Surprisal-based short results
+    sample_results_surprisal_short = []
+    for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data_surprisal_short, label_data, forecasts_surprisal_short), desc="Processing surprisal short results", total=len(input_data_surprisal_short))):
+        context = input_item['target']
+        ground_truth = label_item['target'][:PDT]
+        
+        # Get prediction (mean of samples) - this is now length reduced_pdt
+        prediction_reduced = np.mean(forecast.samples, axis=0)
+        
+        sample_results_surprisal_short.append({
+            'window_id': i,
+            'context': context,
+            'ground_truth': ground_truth,
+            'prediction': prediction_reduced,  # Use actual reduced prediction
+            'prediction_reduced': prediction_reduced,  # Original reduced prediction
+            'reduced_pdt': reduced_pdt,  # Store reduced prediction length for plotting
+            'mae': np.mean(np.abs(prediction_reduced - ground_truth))  # MAE against full ground truth
+        })
+
+    # Method 2: Surprisal-based interpolated results (unchanged)
+    sample_results_surprisal_interpolated = []
+    for i, (input_item, label_item, forecast) in enumerate(tqdm(zip(input_data_surprisal_interpolated, label_data, forecasts_surprisal_interpolated), desc="Processing surprisal interpolated results", total=len(input_data_surprisal_interpolated))):
+        context = input_item['target']
+        ground_truth = label_item['target'][:PDT]
+        prediction = np.mean(forecast.samples, axis=0)
+        
+        # Store interpolation mask if available
+        interpolated_mask = np.zeros(len(context), dtype=bool)  # Default to no interpolation
+        
+        sample_results_surprisal_interpolated.append({
+            'window_id': i,
+            'context': context,
+            'ground_truth': ground_truth,
+            'prediction': prediction,
+            'mae': np.mean(np.abs(prediction - ground_truth)),
+            'interpolated_mask': interpolated_mask
+        })
+
+    print(f"Processed {len(sample_results_surprisal_short)} surprisal-based short samples")
+    print(f"Processed {len(sample_results_surprisal_interpolated)} surprisal-based interpolated samples")
+
+else:
+    print("\n" + "="*60)
+    print("SURPRISAL-BASED METHODS DISABLED")
+    print("="*60)
+    # Create empty results for consistency
+    sample_results_surprisal_short = []
+    sample_results_surprisal_interpolated = []
+    selected_samples_data = {}  # Empty dict for plotting
 
 # Calculate average MAE for all methods
 print("\n" + "="*60)
@@ -596,21 +650,29 @@ print("="*60)
 methods_summary = {
     'Full Context': np.mean([r['mae'] for r in sample_results]),
     'Downsampled (50%)': np.mean([r['mae'] for r in sample_results_downsampled]),
+    'Direct Downsample Input→Output': np.mean([r['mae'] for r in sample_results_direct_downsample]),
     'Interpolated (50% replaced)': np.mean([r['mae'] for r in sample_results_interpolated]),
     'Truncated (recent values)': np.mean([r['mae'] for r in sample_results_truncated]),
-    'Surprisal-based Short (50% most important)': np.mean([r['mae'] for r in sample_results_uncertainty_short]),
-    'Surprisal-based Interpolated (50% replaced)': np.mean([r['mae'] for r in sample_results_uncertainty_interpolated])
 }
+
+# Add surprisal methods only if enabled
+if ENABLE_SURPRISAL:
+    methods_summary['Surprisal-based Short (50% most important)'] = np.mean([r['mae'] for r in sample_results_surprisal_short])
+    methods_summary['Surprisal-based Interpolated (50% replaced)'] = np.mean([r['mae'] for r in sample_results_surprisal_interpolated])
 
 # Calculate standard errors for error bars
 methods_std_errors = {
     'Full Context': np.std([r['mae'] for r in sample_results]) / np.sqrt(len(sample_results)),
     'Downsampled (50%)': np.std([r['mae'] for r in sample_results_downsampled]) / np.sqrt(len(sample_results_downsampled)),
+    'Direct Downsample Input→Output': np.std([r['mae'] for r in sample_results_direct_downsample]) / np.sqrt(len(sample_results_direct_downsample)),
     'Interpolated (50% replaced)': np.std([r['mae'] for r in sample_results_interpolated]) / np.sqrt(len(sample_results_interpolated)),
     'Truncated (recent values)': np.std([r['mae'] for r in sample_results_truncated]) / np.sqrt(len(sample_results_truncated)),
-    'Surprisal-based Short (50% most important)': np.std([r['mae'] for r in sample_results_uncertainty_short]) / np.sqrt(len(sample_results_uncertainty_short)),
-    'Surprisal-based Interpolated (50% replaced)': np.std([r['mae'] for r in sample_results_uncertainty_interpolated]) / np.sqrt(len(sample_results_uncertainty_interpolated))
 }
+
+# Add surprisal methods standard errors only if enabled
+if ENABLE_SURPRISAL:
+    methods_std_errors['Surprisal-based Short (50% most important)'] = np.std([r['mae'] for r in sample_results_surprisal_short]) / np.sqrt(len(sample_results_surprisal_short))
+    methods_std_errors['Surprisal-based Interpolated (50% replaced)'] = np.std([r['mae'] for r in sample_results_surprisal_interpolated]) / np.sqrt(len(sample_results_surprisal_interpolated))
 
 print("Method Performance (Mean Absolute Error):")
 for method, mae in methods_summary.items():
@@ -622,7 +684,7 @@ print(f"\nBest performing method: {best_method[0]} (MAE: {best_method[1]:.4f})")
 
 
 # Plot results for all pruning methods including surprisal-based approaches
-# For 3 random samples, plot context, ground truth and prediction for all 6 methods
+# For 3 random samples, plot context, ground truth and prediction for all methods
 num_samples = 3
 sample_indices = np.random.choice(len(sample_results), num_samples, replace=False)
 
@@ -630,15 +692,26 @@ for plot_idx, idx in enumerate(sample_indices, 1):
     # Get results for all methods
     result = sample_results[idx]
     result_downsampled = sample_results_downsampled[idx]
+    result_direct_downsample = sample_results_direct_downsample[idx]
     result_interpolated = sample_results_interpolated[idx]
     result_truncated = sample_results_truncated[idx]
-    result_uncertainty_short = sample_results_uncertainty_short[idx]
-    result_uncertainty_interpolated = sample_results_uncertainty_interpolated[idx]
     
-    plt.figure(figsize=(15, 18))  # Increased height for 6 subplots
+    # Conditionally get surprisal results if enabled
+    if ENABLE_SURPRISAL:
+        result_surprisal_short = sample_results_surprisal_short[idx]
+        result_surprisal_interpolated = sample_results_surprisal_interpolated[idx]
+        num_subplots = 7
+        fig_height = 21
+    else:
+        result_surprisal_short = None
+        result_surprisal_interpolated = None
+        num_subplots = 5
+        fig_height = 15
+    
+    plt.figure(figsize=(15, fig_height))  # Adjust height based on number of subplots
     
     # 1. Full context
-    plt.subplot(6, 1, 1)
+    plt.subplot(num_subplots, 1, 1)
     context_len = len(result['context'])
     context_indices = np.arange(-context_len, 0)
     forecast_indices = np.arange(0, PDT)
@@ -651,23 +724,24 @@ for plot_idx, idx in enumerate(sample_indices, 1):
              linewidth=2, linestyle='-.', marker='s', markersize=6)
     plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
     
-    # Add patch size in red text on top right
-    plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-             fontsize=12, fontweight='bold', ha='right', va='top')
-    
     plt.title(f"1. Full Context (len={context_len}) - Sample {result['window_id']} - MAE: {result['mae']:.4f}")
+    
+    # Add PSZ in red at the right end of the title area
+    plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+             fontsize=12, fontweight='bold', ha='right', va='bottom')
     plt.xlabel('Time Steps')
     plt.ylabel('Value')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
     # 2. Downsampled context - maintain time scale
-    plt.subplot(6, 1, 2)
+    plt.subplot(num_subplots, 1, 2)
     context_len_reduced = len(result_downsampled['context'])
     
     # Maintain original time scale by spacing the downsampled points appropriately
-    # Since we took every 2nd sample, place them at positions corresponding to original indices
-    downsampled_indices = np.arange(-context_len_reduced*2, 0, 2)  # Every 2nd position
+    # Use compression_ratio to determine the spacing
+    downsample_step = int(1 / compression_ratio)
+    downsampled_indices = np.arange(-context_len_reduced * downsample_step, 0, downsample_step)
     
     plt.plot(downsampled_indices, result_downsampled['context'], label='Downsampled Context (50%)', 
              color='blue', linewidth=2, linestyle='-.', marker='o', markersize=6)
@@ -677,18 +751,58 @@ for plot_idx, idx in enumerate(sample_indices, 1):
              linewidth=2, linestyle='-.', marker='s', markersize=6)
     plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
     
-    # Add patch size in red text on top right
-    plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-             fontsize=12, fontweight='bold', ha='right', va='top')
-    
     plt.title(f"2. Downsampled Context (len={context_len_reduced}) - Sample {result_downsampled['window_id']} - MAE: {result_downsampled['mae']:.4f}")
+    
+    # Add PSZ in red at the right end of the title area
+    plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+             fontsize=12, fontweight='bold', ha='right', va='bottom')
     plt.xlabel('Time Steps')
     plt.ylabel('Value')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 3. Interpolated context (50% replaced) - highlight interpolated samples
-    plt.subplot(6, 1, 3)
+    # 3. Direct Downsampled Ground Truth (new experiment)
+    plt.subplot(num_subplots, 1, 3)
+    context_len_direct = len(result_direct_downsample['context'])
+    
+    # Plot downsampled context with proper time scale
+    # Use compression_ratio to determine the spacing
+    downsample_step_context = int(1 / compression_ratio)
+    downsampled_context_indices = np.arange(-context_len_direct * downsample_step_context, 0, downsample_step_context)
+    
+    plt.plot(downsampled_context_indices, result_direct_downsample['context'], label='Downsampled Context', color='blue', linewidth=2, 
+             linestyle='-.', marker='o', markersize=6)
+    
+    # Plot downsampled forecast vs downsampled ground truth
+    # These are the actual comparison points for this experiment
+    downsample_step = result_direct_downsample['downsample_step']
+    reduced_pdt = result_direct_downsample['reduced_pdt']
+    downsampled_forecast_indices = np.arange(0, reduced_pdt * downsample_step, downsample_step)
+    
+    plt.plot(downsampled_forecast_indices, result_direct_downsample['downsampled_ground_truth'], 
+             label='Downsampled GT', color='purple', linewidth=3, linestyle='--', marker='x', markersize=8)
+    plt.plot(downsampled_forecast_indices, result_direct_downsample['prediction_downsampled'], 
+             label='Downsampled Pred', color='orange', linewidth=2, linestyle='--', marker='s', markersize=8)
+    
+    # Show full resolution data as light background for context
+    forecast_indices = np.arange(0, PDT)
+    plt.plot(forecast_indices, result_direct_downsample['ground_truth'], color='green', 
+             linewidth=1, alpha=0.3, linestyle='-', label='Full GT (background)')
+    
+    plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
+    
+    plt.title(f"3. Direct Downsample GT (downsampled input→downsampled output) - Sample {result_direct_downsample['window_id']} - MAE: {result_direct_downsample['mae']:.4f}")
+    
+    # Add PSZ in red at the right end of the title area
+    plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+             fontsize=12, fontweight='bold', ha='right', va='bottom')
+    plt.xlabel('Time Steps')
+    plt.ylabel('Value')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 4. Interpolated context (50% replaced) - highlight interpolated samples
+    plt.subplot(num_subplots, 1, 4)
     context_len_interpolated = len(result_interpolated['context'])
     context_indices_interpolated = np.arange(-context_len_interpolated, 0)
     
@@ -719,18 +833,18 @@ for plot_idx, idx in enumerate(sample_indices, 1):
              color='red', linewidth=2, linestyle='-.', marker='s', markersize=6)
     plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
     
-    # Add patch size in red text on top right
-    plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-             fontsize=12, fontweight='bold', ha='right', va='top')
+    plt.title(f"4. Interpolated Context (50% samples replaced, len={context_len_interpolated}) - Sample {result_interpolated['window_id']} - MAE: {result_interpolated['mae']:.4f}")
     
-    plt.title(f"3. Interpolated Context (50% samples replaced, len={context_len_interpolated}) - Sample {result_interpolated['window_id']} - MAE: {result_interpolated['mae']:.4f}")
+    # Add PSZ in red at the right end of the title area
+    plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+             fontsize=12, fontweight='bold', ha='right', va='bottom')
     plt.xlabel('Time Steps')
     plt.ylabel('Value')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 4. Truncated context (most recent values) - plot from correct time index without padding
-    plt.subplot(6, 1, 4)
+    # 5. Truncated context (most recent values) - plot from correct time index without padding
+    plt.subplot(num_subplots, 1, 5)
     context_len_truncated = len(result_truncated['context'])
     
     # Plot from the correct time index without zero padding
@@ -750,106 +864,108 @@ for plot_idx, idx in enumerate(sample_indices, 1):
     full_context_xlim = (-context_len, PDT)
     plt.xlim(full_context_xlim)
     
-    # Add patch size in red text on top right
-    plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-             fontsize=12, fontweight='bold', ha='right', va='top')
+    plt.title(f"5. Truncated Context (most recent {context_len_truncated} values) - Sample {result_truncated['window_id']} - MAE: {result_truncated['mae']:.4f}")
     
-    plt.title(f"4. Truncated Context (most recent {context_len_truncated} values) - Sample {result_truncated['window_id']} - MAE: {result_truncated['mae']:.4f}")
+    # Add PSZ in red at the right end of the title area
+    plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+             fontsize=12, fontweight='bold', ha='right', va='bottom')
     plt.xlabel('Time Steps')
     plt.ylabel('Value')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 5. Surprisal-based short context - plot selected samples at original locations
-    plt.subplot(6, 1, 5)
-    context_len_unc_short = len(result_uncertainty_short['context'])
-    
-    # Get the original context and uncertainty data for this sample
-    if idx in selected_samples_data:
-        sample_data = selected_samples_data[idx]
-        original_signal = sample_data['signal']  # Original full context
-        uncertainty_scores = sample_data['uncertainty']  # Uncertainty for each position
+    # Conditionally add surprisal-based subplots if enabled
+    if ENABLE_SURPRISAL:
+        # 6. Surprisal-based short context - plot selected samples at original locations
+        plt.subplot(num_subplots, 1, 6)
+        context_len_unc_short = len(result_surprisal_short['context'])
         
-        # Recreate the selection logic to find which indices were kept
-        num_keep = context_len_unc_short  # This should match reduced_ctx
-        important_indices = np.argsort(uncertainty_scores)[-num_keep:]  # Get indices of highest uncertainty
-        important_indices = np.sort(important_indices)  # Keep them in order
+        # Get the original context and surprisal data for this sample
+        if idx in selected_samples_data:
+            sample_data = selected_samples_data[idx]
+            original_signal = sample_data['signal']  # Original full context
+            surprisal_scores = sample_data['surprisal']  # Surprisal for each position
+            
+            # Recreate the selection logic to find which indices were kept
+            num_keep = context_len_unc_short  # This should match reduced_ctx
+            important_indices = np.argsort(surprisal_scores)[-num_keep:]  # Get indices of highest surprisal
+            important_indices = np.sort(important_indices)  # Keep them in order
+            
+            # Plot only the selected samples at their original time positions
+            ctx_indices = np.arange(-CTX, 0)
+            selected_positions = ctx_indices[important_indices]
+            selected_values = original_signal[important_indices]
+            
+            plt.plot(selected_positions, selected_values, 'o-', color='blue', linewidth=2, 
+                    linestyle='-.', markersize=6, label='Surprisal-based Context (50% most important)')
+        else:
+            # Fallback: plot as contiguous block if surprisal data not available
+            unc_start_index = -context_len_unc_short
+            unc_indices = np.arange(unc_start_index, 0)
+            plt.plot(unc_indices, result_surprisal_short['context'], 'o-', color='blue', linewidth=2, 
+                    linestyle='-.', markersize=6, label='Surprisal-based Context (50% most important)')
         
-        # Plot only the selected samples at their original time positions
-        ctx_indices = np.arange(-CTX, 0)
-        selected_positions = ctx_indices[important_indices]
-        selected_values = original_signal[important_indices]
+        plt.plot(forecast_indices, result_surprisal_short['ground_truth'], label='Ground Truth', 
+                color='green', linewidth=3, marker='o', markersize=6, linestyle='-.')
+        plt.plot(forecast_indices, result_surprisal_short['prediction'], label='Prediction', 
+                color='red', linewidth=2, linestyle='-.', marker='s', markersize=6)
+        plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
         
-        plt.plot(selected_positions, selected_values, 'o-', color='blue', linewidth=2, 
-                 linestyle='-.', markersize=6, label='Surprisal-based Context (50% most important)')
-    else:
-        # Fallback: plot as contiguous block if uncertainty data not available
-        unc_start_index = -context_len_unc_short
-        unc_indices = np.arange(unc_start_index, 0)
-        plt.plot(unc_indices, result_uncertainty_short['context'], 'o-', color='blue', linewidth=2, 
-                 linestyle='-.', markersize=6, label='Surprisal-based Context (50% most important)')
-    
-    plt.plot(forecast_indices, result_uncertainty_short['ground_truth'], label='Ground Truth', 
-             color='green', linewidth=3, marker='o', markersize=6, linestyle='-.')
-    plt.plot(forecast_indices, result_uncertainty_short['prediction'], label='Prediction', 
-             color='red', linewidth=2, linestyle='-.', marker='s', markersize=6)
-    plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
-    
-    # Set x-axis limits to match other methods
-    plt.xlim(-context_len, PDT)
-    
-    # Add patch size in red text on top right
-    plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-             fontsize=12, fontweight='bold', ha='right', va='top')
-    
-    plt.title(f"5. Surprisal-based Short Context ({context_len_unc_short} most important values) - Sample {result_uncertainty_short['window_id']} - MAE: {result_uncertainty_short['mae']:.4f}")
-    plt.xlabel('Time Steps')
-    plt.ylabel('Value')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # 6. Surprisal-based interpolated context - highlight interpolated samples
-    plt.subplot(6, 1, 6)
-    context_len_unc_interp = len(result_uncertainty_interpolated['context'])
-    context_indices_unc_interp = np.arange(-context_len_unc_interp, 0)
-    
-    # Get the original last CTX samples to identify which were interpolated
-    original_last_ctx = input_data[idx]['target'][-CTX:]
-    unc_interpolated_context = result_uncertainty_interpolated['context']
-    
-    # Find interpolated positions (where values differ from original)
-    unc_interpolated_mask = np.abs(unc_interpolated_context - original_last_ctx) > 1e-6
-    
-    # Plot original samples in blue
-    plt.plot(context_indices_unc_interp[~unc_interpolated_mask], 
-             unc_interpolated_context[~unc_interpolated_mask], 
-             'o', color='blue', markersize=6, label='Original Samples')
-    
-    # Plot interpolated samples in orange
-    plt.plot(context_indices_unc_interp[unc_interpolated_mask], 
-             unc_interpolated_context[unc_interpolated_mask], 
-             'o', color='orange', markersize=6, label='Interpolated Samples')
-    
-    # Connect all points with a line
-    plt.plot(context_indices_unc_interp, unc_interpolated_context, 
-             color='blue', linewidth=2, linestyle='-.', alpha=0.7)
-    
-    plt.plot(forecast_indices, result_uncertainty_interpolated['ground_truth'], label='Ground Truth', 
-             color='green', linewidth=3, marker='o', markersize=6, linestyle='-.')
-    plt.plot(forecast_indices, result_uncertainty_interpolated['prediction'], label='Prediction', 
-             color='red', linewidth=2, linestyle='-.', marker='s', markersize=6)
-    plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
-    
-    # Add patch size in red text on top right
-    plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-             fontsize=12, fontweight='bold', ha='right', va='top')
-    
-    plt.title(f"6. Surprisal-based Interpolated Context (50% least important replaced, len={context_len_unc_interp}) - Sample {result_uncertainty_interpolated['window_id']} - MAE: {result_uncertainty_interpolated['mae']:.4f}")
-    plt.xlabel('Time Steps')
-    plt.ylabel('Value')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
+        # Set x-axis limits to match other methods
+        plt.xlim(-context_len, PDT)
+        
+        plt.title(f"6. Surprisal-based Short Context ({context_len_unc_short} most important values) - Sample {result_surprisal_short['window_id']} - MAE: {result_surprisal_short['mae']:.4f}")
+        
+        # Add PSZ in red at the right end of the title area
+        plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+                fontsize=12, fontweight='bold', ha='right', va='bottom')
+        plt.xlabel('Time Steps')
+        plt.ylabel('Value')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # 7. Surprisal-based interpolated context - highlight interpolated samples
+        plt.subplot(num_subplots, 1, 7)
+        context_len_unc_interp = len(result_surprisal_interpolated['context'])
+        context_indices_unc_interp = np.arange(-context_len_unc_interp, 0)
+        
+        # Get the original last CTX samples to identify which were interpolated
+        original_last_ctx = input_data[idx]['target'][-CTX:]
+        unc_interpolated_context = result_surprisal_interpolated['context']
+        
+        # Find interpolated positions (where values differ from original)
+        unc_interpolated_mask = np.abs(unc_interpolated_context - original_last_ctx) > 1e-6
+        
+        # Plot original samples in blue
+        plt.plot(context_indices_unc_interp[~unc_interpolated_mask], 
+                unc_interpolated_context[~unc_interpolated_mask], 
+                'o', color='blue', markersize=6, label='Original Samples')
+        
+        # Plot interpolated samples in orange
+        plt.plot(context_indices_unc_interp[unc_interpolated_mask], 
+                unc_interpolated_context[unc_interpolated_mask], 
+                'o', color='orange', markersize=6, label='Interpolated Samples')
+        
+        # Connect all points with a line
+        plt.plot(context_indices_unc_interp, unc_interpolated_context, 
+                color='blue', linewidth=2, linestyle='-.', alpha=0.7)
+        
+        plt.plot(forecast_indices, result_surprisal_interpolated['ground_truth'], label='Ground Truth', 
+                color='green', linewidth=3, marker='o', markersize=6, linestyle='-.')
+        plt.plot(forecast_indices, result_surprisal_interpolated['prediction'], label='Prediction', 
+                color='red', linewidth=2, linestyle='-.', marker='s', markersize=6)
+        plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
+        
+        plt.title(f"7. Surprisal-based Interpolated Context (50% least important replaced, len={context_len_unc_interp}) - Sample {result_surprisal_interpolated['window_id']} - MAE: {result_surprisal_interpolated['mae']:.4f}")
+        
+        # Add PSZ in red at the right end of the title area
+        plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+                fontsize=12, fontweight='bold', ha='right', va='bottom')
+        plt.xlabel('Time Steps')
+        plt.ylabel('Value')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
     # Save plot
     plot_filename = os.path.join(results_dir, f"sample_{plot_idx}_all_methods_comparison.png")
     plt.tight_layout()
@@ -877,11 +993,11 @@ for i, (bar, mae, error) in enumerate(zip(bars, mae_values, mae_errors)):
 plt.xlabel('Context Pruning Method', fontsize=12)
 plt.ylabel('Mean Absolute Error (MAE)', fontsize=12)
 
-# Add patch size in red text on top right of the summary plot
-plt.text(0.98, 0.95, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
-         fontsize=14, fontweight='bold', ha='right', va='top')
-
 plt.title(f'Context Pruning Methods Comparison\nModel: {MODEL}-{SIZE} | Dataset: {dataset_name} | Context: {CTX} -> Prediction: {PDT}', fontsize=14)
+
+# Add PSZ in red at the right end of the title area
+plt.text(0.98, 1.02, f'PSZ: {PSZ}', transform=plt.gca().transAxes, color='red', 
+         fontsize=14, fontweight='bold', ha='right', va='bottom')
 plt.xticks(range(len(methods)), methods, rotation=45, ha='right')
 plt.grid(axis='y', linestyle='--', alpha=0.7)
 plt.tight_layout()
@@ -909,27 +1025,28 @@ for method, mae in methods_summary.items():
 
 
 # Create surprisal and delta analysis plots for the 3 selected samples
-print("\nCreating surprisal and delta analysis plots for selected samples...")
+if ENABLE_SURPRISAL:
+    print("\nCreating surprisal and delta analysis plots for selected samples...")
 
-# Select 3 random samples for detailed analysis from the first 10 (where we saved uncertainty data)
+# Select 3 random samples for detailed analysis from the first 10 (where we saved surprisal data)
 num_samples = min(3, len(selected_samples_data))  # Use min to handle cases with < 10 samples
 available_indices = list(selected_samples_data.keys())
 sample_indices = np.random.choice(available_indices, num_samples, replace=False)
 
 for plot_idx, idx in enumerate(sample_indices, 1):
-    # Get the stored uncertainty data for this sample
+    # Get the stored surprisal data for this sample
     if idx in selected_samples_data:
         sample_data = selected_samples_data[idx]
         signal = sample_data['signal']
-        uncertainty = sample_data['uncertainty']
+        surprisal = sample_data['surprisal']
         delta = sample_data['delta']  # delta[i] = x[i] - x[i-1], delta[0] = 0
         predictions = sample_data['predictions']  # Prediction means for each position
         
         # Create figure with 3 subplots for each sample
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 15))
         
-        # Plot 1: Signal and Uncertainty Map
-        ax1_twin = ax1.twinx()  # Create twin axis for uncertainty
+        # Plot 1: Signal and Surprisal Map
+        ax1_twin = ax1.twinx()  # Create twin axis for surprisal
         
         # Plot the signal (last CTX samples)
         ctx_indices = np.arange(-CTX, 0)
@@ -941,7 +1058,7 @@ for plot_idx, idx in enumerate(sample_indices, 1):
         ax1.grid(True, alpha=0.3)
 
         # Plot the surprisal map
-        line2 = ax1_twin.plot(ctx_indices, uncertainty, 's-', color='red', linewidth=2, 
+        line2 = ax1_twin.plot(ctx_indices, surprisal, 's-', color='red', linewidth=2, 
                              linestyle='-.', markersize=6, alpha=0.7, label='Surprisal Score')
         ax1_twin.set_ylabel('Surprisal Score', color='red')
         ax1_twin.tick_params(axis='y', labelcolor='red')
@@ -965,7 +1082,7 @@ for plot_idx, idx in enumerate(sample_indices, 1):
         # We skip the first position (i=0) since delta[0] = 0 (no previous value)
         delta_positions = ctx_indices[1:]  # Skip first position
         delta_values = delta[1:]  # Skip delta[0] which is 0
-        uncertainty_for_delta = uncertainty[1:]  # Corresponding uncertainty values
+        surprisal_for_delta = surprisal[1:]  # Corresponding surprisal values
         
         line3 = ax2.plot(delta_positions, delta_values, 'o-', color='green', linewidth=2, 
                         linestyle='-.', markersize=6, label='Signal Delta (xi - xi-1)')
@@ -976,7 +1093,7 @@ for plot_idx, idx in enumerate(sample_indices, 1):
         ax2.grid(True, alpha=0.3)
         
         # Plot the surprisal map for delta positions
-        line4 = ax2_twin.plot(delta_positions, uncertainty_for_delta, 's-', color='red', linewidth=2, 
+        line4 = ax2_twin.plot(delta_positions, surprisal_for_delta, 's-', color='red', linewidth=2, 
                              linestyle='-.', markersize=6, alpha=0.7, label='Surprisal Score')
         ax2_twin.set_ylabel('Surprisal Score', color='red')
         ax2_twin.tick_params(axis='y', labelcolor='red')
@@ -1007,7 +1124,7 @@ for plot_idx, idx in enumerate(sample_indices, 1):
         ax3.grid(True, alpha=0.3)
         
         # Plot the surprisal map
-        line7 = ax3_twin.plot(ctx_indices, uncertainty, 's-', color='red', linewidth=2, 
+        line7 = ax3_twin.plot(ctx_indices, surprisal, 's-', color='red', linewidth=2, 
                              linestyle='-.', markersize=6, alpha=0.7, label='Surprisal Score')
         ax3_twin.set_ylabel('Surprisal Score', color='red')
         ax3_twin.tick_params(axis='y', labelcolor='red')
@@ -1034,4 +1151,6 @@ for plot_idx, idx in enumerate(sample_indices, 1):
     else:
         print(f"Warning: No surprisal data available for sample {idx} (plot {plot_idx})")
 
-print("\nSurprisal and delta analysis complete!")
+    print("\nSurprisal and delta analysis complete!")
+else:
+    print("\nSurprisal and delta analysis skipped (ENABLE_SURPRISAL=False)")
