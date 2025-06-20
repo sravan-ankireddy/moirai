@@ -51,6 +51,167 @@ ALL_EXPERIMENT_RESULTS = {}
 print("Loading Moirai model...")
 base_module = MoiraiModule.from_pretrained(f"{MODEL_FOLDER}/{MODEL}-1.0-R-{SIZE}")
 
+def create_visualization_plots(input_data, input_data_reduced, label_data, forecasts_baseline, forecasts_reduced, forecasts_truncated, results_dir, reduced_ctx, reduced_pdt, compression_ratio, CTX, PSZ):
+    """Create and save visualization plots for the experiment."""
+    
+    # Select a few samples to visualize (first 3 windows)
+    num_plots = min(3, len(input_data))
+    
+    for i in range(num_plots):
+        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+        
+        # Get data for this sample
+        input_item = input_data[i]
+        input_item_reduced = input_data_reduced[i]
+        label_item = label_data[i]
+        
+        full_context = input_item['target']
+        reduced_context = input_item_reduced['target']
+        ground_truth = label_item['target'][:PDT]
+        
+        # Get predictions
+        pred_baseline = np.mean(forecasts_baseline[i].samples, axis=0)
+        pred_reduced = np.mean(forecasts_reduced[i].samples, axis=0)
+        pred_truncated = np.mean(forecasts_truncated[i].samples, axis=0)
+        
+        # Use consistent time scale: show only last CTX window for all plots
+        # This ensures fair visual comparison across all methods
+        display_context_length = CTX
+        
+        # For baseline: take last CTX steps from full context
+        baseline_context = full_context[-display_context_length:]
+        baseline_context_time = np.arange(-display_context_length, 0)
+        
+        # For reduced context: it's downsampled, not truncated
+        # The reduced_context represents every nth sample from the original context
+        # So we need to space them out on the original time scale
+        downsample_step = int(1 / compression_ratio)
+        
+        # Create time indices for downsampled context - maintain original spacing
+        # If we have reduced_ctx samples, they represent every downsample_step-th sample
+        # from the last (reduced_ctx * downsample_step) samples of the original
+        original_context_length = min(len(full_context), reduced_ctx * downsample_step)
+        downsampled_context_time = np.arange(-original_context_length, 0, downsample_step)[-len(reduced_context):]
+        
+        pred_time = np.arange(0, PDT)
+        
+        # Plot 1: Baseline (Show last CTX window + Full Prediction)
+        axes[0].plot(baseline_context_time, baseline_context, label='Context', color='blue', linewidth=2, 
+                    linestyle='-.', marker='o', markersize=6)
+        axes[0].plot(pred_time, ground_truth, label='Ground Truth', color='green', 
+                    linewidth=3, marker='o', markersize=6, linestyle='-.')
+        axes[0].plot(pred_time, pred_baseline, label='Prediction', color='red', 
+                    linewidth=2, linestyle='-.', marker='s', markersize=6)
+        axes[0].axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
+        
+        # Add patch size in red text on top right
+        axes[0].text(0.98, 0.95, f'PSZ: {PSZ}', transform=axes[0].transAxes, color='red', 
+                    fontsize=12, fontweight='bold', ha='right', va='top')
+        
+        axes[0].set_title(f'1. Full Context (len={len(full_context)}) - Sample {i+1} - MAE: {np.mean(np.abs(pred_baseline - ground_truth)):.4f}')
+        axes[0].set_xlabel('Time Steps')
+        axes[0].set_ylabel('Value')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot 2: Reduced Context + Reduced Prediction  
+        # Calculate downsample variables for prediction
+        downsampled_ground_truth = ground_truth[::downsample_step][:reduced_pdt]
+        reduced_pred_time = np.arange(0, reduced_pdt * downsample_step, downsample_step)
+        
+        # Plot downsampled context at original time positions (with gaps)
+        axes[1].plot(downsampled_context_time, reduced_context, label=f'Downsampled Context (len={reduced_ctx})', 
+                    color='blue', linewidth=2, linestyle='-.', marker='o', markersize=6)
+        axes[1].plot(pred_time, ground_truth, label='Ground Truth', color='green', 
+                    linewidth=3, marker='o', markersize=6, linestyle='-.')
+        axes[1].plot(reduced_pred_time[:len(downsampled_ground_truth)], downsampled_ground_truth, 
+                    label='Ground Truth (Downsampled)', color='green', 
+                    linewidth=3, marker='o', markersize=6, linestyle='-.')
+        axes[1].plot(reduced_pred_time[:len(pred_reduced)], pred_reduced, 
+                    label='Prediction', color='red', 
+                    linewidth=2, linestyle='-.', marker='s', markersize=6)
+        axes[1].axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
+        
+        # Add patch size in red text on top right
+        axes[1].text(0.98, 0.95, f'PSZ: {PSZ}', transform=axes[1].transAxes, color='red', 
+                    fontsize=12, fontweight='bold', ha='right', va='top')
+        
+        axes[1].set_title(f'2. Downsampled Context (len={reduced_ctx}) - Sample {i+1} - MAE: {np.mean(np.abs(pred_reduced - downsampled_ground_truth)):.4f}')
+        axes[1].set_xlabel('Time Steps')
+        axes[1].set_ylabel('Value')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        # Plot 3: Truncated Context (Same Prediction Length)
+        # For truncated context: show most recent reduced_ctx values at end of time axis
+        truncated_context_time = np.arange(-reduced_ctx, 0)
+        
+        axes[2].plot(truncated_context_time, reduced_context, label=f'Truncated Context (most recent {reduced_ctx})', 
+                    color='blue', linewidth=2, linestyle='-.', marker='o', markersize=6)
+        axes[2].plot(pred_time, ground_truth, label='Ground Truth', color='green', 
+                    linewidth=3, marker='o', markersize=6, linestyle='-.')
+        axes[2].plot(pred_time, pred_truncated, label='Prediction', color='red', 
+                    linewidth=2, linestyle='-.', marker='s', markersize=6)
+        axes[2].axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
+        
+        # Add patch size in red text on top right
+        axes[2].text(0.98, 0.95, f'PSZ: {PSZ}', transform=axes[2].transAxes, color='red', 
+                    fontsize=12, fontweight='bold', ha='right', va='top')
+        
+        axes[2].set_title(f'3. Truncated Context (most recent {reduced_ctx} values) - Sample {i+1} - MAE: {np.mean(np.abs(pred_truncated - ground_truth)):.4f}')
+        axes[2].set_xlabel('Time Steps')
+        axes[2].set_ylabel('Value')
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+        
+        # Common formatting - ensure all plots have same x-axis range
+        x_min = -display_context_length  # Show full context range
+        x_max = PDT
+        for ax in axes:
+            ax.set_xlim(x_min, x_max)
+        
+        plt.suptitle(f'Sample {i+1}: Comparison of Different Configurations\nCompression Ratio: {compression_ratio}', fontsize=14)
+        plt.tight_layout()
+        
+        # Save the plot
+        plot_path = f"{results_dir}/sample_{i+1}_comparison.png"
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  Saved visualization: {plot_path}")
+    
+    # Create summary MAE comparison plot for this configuration
+    methods = ['Baseline\n(Full CTX+PDT)', 'Reduced\n(CTX+PDT)', 'Truncated\n(CTX only)']
+    mae_values = [
+        np.mean([np.mean(np.abs(np.mean(forecasts_baseline[i].samples, axis=0) - label_data[i]['target'][:PDT])) for i in range(len(forecasts_baseline))]),
+        np.mean([np.mean(np.abs(np.mean(forecasts_reduced[i].samples, axis=0) - 
+                                label_data[i]['target'][::int(1/compression_ratio)][:reduced_pdt])) for i in range(len(forecasts_reduced))]),
+        np.mean([np.mean(np.abs(np.mean(forecasts_truncated[i].samples, axis=0) - label_data[i]['target'][:PDT])) for i in range(len(forecasts_truncated))])
+    ]
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    bars = ax.bar(methods, mae_values, alpha=0.8, color=['blue', 'orange', 'green'])
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, mae_values):
+        height = bar.get_height()
+        ax.annotate(f'{value:.4f}',
+                   xy=(bar.get_x() + bar.get_width() / 2, height),
+                   xytext=(0, 3),
+                   textcoords="offset points",
+                   ha='center', va='bottom', fontsize=10)
+    
+    ax.set_ylabel('Mean Absolute Error (MAE)')
+    ax.set_title(f'MAE Comparison for Current Configuration\nCompression Ratio: {compression_ratio}')
+    ax.grid(True, alpha=0.3)
+    
+    # Save the MAE comparison plot
+    mae_plot_path = f"{results_dir}/mae_comparison.png"
+    plt.savefig(mae_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"  Saved MAE comparison: {mae_plot_path}")
+
 def run_experiment_configuration(CTX, PSZ, compression_ratio):
     """
     Run a complete experiment for a given configuration.
@@ -232,6 +393,14 @@ def run_experiment_configuration(CTX, PSZ, compression_ratio):
     print(f"  Baseline MAE: {results['baseline']['mae_mean']:.4f} ± {results['baseline']['mae_sem']:.4f}")
     print(f"  Reduced CTX+PDT MAE: {results['reduced_ctx_pdt']['mae_mean']:.4f} ± {results['reduced_ctx_pdt']['mae_sem']:.4f}")
     print(f"  Truncated CTX MAE: {results['truncated_ctx']['mae_mean']:.4f} ± {results['truncated_ctx']['mae_sem']:.4f}")
+    
+    # Generate visualization plots
+    print("Generating visualization plots...")
+    create_visualization_plots(
+        input_data, input_data_reduced, label_data, 
+        forecasts_baseline, forecasts_reduced, forecasts_truncated,
+        results_dir, reduced_ctx, reduced_pdt, compression_ratio, CTX, PSZ
+    )
     
     return results
 
