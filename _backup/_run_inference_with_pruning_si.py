@@ -16,7 +16,7 @@ from uni2ts.model.moirai import MoiraiForecast, MoiraiModule
 # Configuration
 MODEL = "moirai"  # or "moirai-moe"
 SIZE = "large"    # small, base, large
-CTX = 2048          # Context length
+CTX = 512          # Context length
 PDT = 64           # Prediction length
 BSZ = 32          # Batch size
 GPU = 2           # GPU device
@@ -25,11 +25,11 @@ PSZ_surprisal = "auto"
 compression_ratio = 1/2 # 1/2, 1/4, 1/8, etc.
 
 # Control flags
-ENABLE_SURPRISAL = False  # Set to False to skip slow self-information computation and surprisal-based methods
+ENABLE_SURPRISAL = True  # Set to False to skip slow self-information computation and surprisal-based methods
 
 # Data configuration
 HOME = os.path.expanduser("~")
-DATASET_FOLDER = f"{HOME}/time-series/moirai/time-moe-eval/"
+DATASET_FOLDER = f"{HOME}/time-series/datasets/time-moe-eval/"
 MODEL_FOLDER = "Salesforce"
 
 # CSV_PATH = f"{DATASET_FOLDER}/ETT-small/ETTm1.csv"

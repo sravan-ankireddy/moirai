@@ -13,11 +13,18 @@ warnings.filterwarnings('ignore')
 
 from uni2ts.model.moirai import MoiraiForecast, MoiraiModule
 
-HOME = os.path.expanduser("~")
+def run_moirai_inference(MODEL="moirai", SIZE="large", CTX=512, PDT=64, BSZ=32, GPU=0, PSZ="auto", PSZ_surprisal="auto", compression_ratio=1/2, ENABLE_SURPRISAL=True, NUM_WINDOWS=10, NUM_SAMPLES=1000):
 
-def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home", MODEL_FOLDER = "Salesforce", CSV = "ETT-small/ETTm1.csv", COLUMN = 0, CTX=512, PDT=64, BSZ=32, GPU=0, PSZ="auto", PSZ_surprisal="auto", compression_ratio=1/2, ENABLE_SURPRISAL=True, NUM_WINDOWS=10, NUM_SAMPLES=1000):
+    # Data configuration
+    HOME = os.path.expanduser("~")
+    DATASET_FOLDER = f"{HOME}/time-series/datasets/time-moe-eval/"
+    MODEL_FOLDER = "Salesforce"
 
-    CSV_PATH = f"{DATASET_FOLDER}/{CSV}"
+    # CSV_PATH = f"{DATASET_FOLDER}/ETT-small/ETTm1.csv"
+    CSV_PATH = f"{DATASET_FOLDER}/synthetic_sinusoidal.csv"
+    # CSV_PATH = f"{DATASET_FOLDER}/electricity.csv"
+
+    COLUMN = 3        # Column to analyze (0-indexed)
 
     # Load Moirai model
     print("Loading Moirai model...")
@@ -383,7 +390,7 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
     predictor_ar = model_ar.create_predictor(batch_size=BSZ)
     print("Autoregressive predictor created successfully!")
 
-    def compute_surprisal(input_data_context, label_data_context, predictor_ar):
+    def compute_surprisal(input_data_context, predictor_ar):
         """
         Compute surprisal/importance for each position in the context windows using surprisal.
         Higher surprisal (surprisal) = higher importance.
@@ -424,8 +431,10 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             std_pred = np.std(samples)
             
             # Get the true value for this position
-            true_value = label_data_context[i]['target'][0]
-
+            # The true value is the target at the position we're predicting
+            input_item = input_data_context[i]
+            true_value = input_item['target'][-1]  # Last value in the context (what we're predicting)
+            
             # Compute surprisal of the true value under the Gaussian fitted to predictions
             # surprisal(x) = log(√(2πσ²)) + (x-μ)²/(2σ²)
             if std_pred > 0:
@@ -458,10 +467,9 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             distance=1,
         )
         input_data_surprisal = list(test_data_surprisal.input)
-        label_data_surprisal = list(test_data_surprisal.label)
 
         print("Computing surprisal scores for union of all samples in all context windows...")
-        surprisal_map, predictions_map, log_normalizers_map, squared_error_terms_map = compute_surprisal(input_data_surprisal, label_data_surprisal, predictor_ar)
+        surprisal_map, predictions_map, log_normalizers_map, squared_error_terms_map = compute_surprisal(input_data_surprisal, predictor_ar)
 
         # Method 1: Surprisal-based pruning (drop least important 50%)
         print("\nMethod 1: Surprisal-based pruning (drop least important 50%)")
@@ -496,7 +504,7 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
                     'signal': last_ctx_samples.copy(),
                     'surprisal': surprisal_scores.copy(), 
                     'delta': signal_deltas.copy(),
-                    'predictions': prediction_means.copy(),  # Store predictions for visualization
+                                                                                                                            'predictions': prediction_means.copy(),  # Store predictions for visualization
                     'log_normalizers': log_normalizers.copy(),  # Store log normalizer terms
                     'squared_error_terms': squared_error_terms.copy()  # Store squared error terms
                 }
@@ -704,12 +712,12 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
         context_indices = np.arange(-context_len, 0)
         forecast_indices = np.arange(0, PDT)
         
-        plt.plot(context_indices, result['context'], label='Context', color='blue', linewidth=1, 
+        plt.plot(context_indices, result['context'], label='Context', color='blue', linewidth=2, 
                 linestyle='-.', marker='o', markersize=4)
         plt.plot(forecast_indices, result['ground_truth'], label='Ground Truth', color='green', 
-                linewidth=1, marker='o', markersize=4, linestyle='-.')
+                linewidth=3, marker='o', markersize=4, linestyle='-.')
         plt.plot(forecast_indices, result['prediction'], label='Prediction', color='red', 
-                linewidth=1, linestyle='-.', marker='s', markersize=4)
+                linewidth=2, linestyle='-.', marker='s', markersize=4)
         plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
         
         plt.title(f"1. Full Context (len={context_len}) - Sample {result['window_id']} - MAE: {result['mae']:.4f}")
@@ -732,11 +740,11 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
         downsampled_indices = np.arange(-context_len_reduced * downsample_step, 0, downsample_step)
         
         plt.plot(downsampled_indices, result_downsampled['context'], label='Downsampled Context (50%)', 
-                color='blue', linewidth=1, linestyle='-.', marker='o', markersize=4)
+                color='blue', linewidth=2, linestyle='-.', marker='o', markersize=4)
         plt.plot(forecast_indices, result_downsampled['ground_truth'], label='Ground Truth', color='green', 
-                linewidth=1, marker='o', markersize=4, linestyle='-.')
+                linewidth=3, marker='o', markersize=4, linestyle='-.')
         plt.plot(forecast_indices, result_downsampled['prediction'], label='Prediction', color='red', 
-                linewidth=1, linestyle='-.', marker='s', markersize=4)
+                linewidth=2, linestyle='-.', marker='s', markersize=4)
         plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
         
         plt.title(f"2. Downsampled Context (len={context_len_reduced}) - Sample {result_downsampled['window_id']} - MAE: {result_downsampled['mae']:.4f}")
@@ -758,7 +766,7 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
         downsample_step_context = int(1 / compression_ratio)
         downsampled_context_indices = np.arange(-context_len_direct * downsample_step_context, 0, downsample_step_context)
         
-        plt.plot(downsampled_context_indices, result_direct_downsample['context'], label='Downsampled Context', color='blue', linewidth=1, 
+        plt.plot(downsampled_context_indices, result_direct_downsample['context'], label='Downsampled Context', color='blue', linewidth=2, 
                 linestyle='-.', marker='o', markersize=4)
         
         # Plot downsampled forecast vs downsampled ground truth
@@ -768,9 +776,9 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
         downsampled_forecast_indices = np.arange(0, reduced_pdt * downsample_step, downsample_step)
         
         plt.plot(downsampled_forecast_indices, result_direct_downsample['downsampled_ground_truth'], 
-                label='Downsampled GT', color='purple', linewidth=1, linestyle='--', marker='x', markersize=8)
+                label='Downsampled GT', color='purple', linewidth=3, linestyle='--', marker='x', markersize=8)
         plt.plot(downsampled_forecast_indices, result_direct_downsample['prediction_downsampled'], 
-                label='Downsampled Pred', color='orange', linewidth=1, linestyle='--', marker='s', markersize=8)
+                label='Downsampled Pred', color='orange', linewidth=2, linestyle='--', marker='s', markersize=8)
         
         # Show full resolution data as light background for context
         forecast_indices = np.arange(0, PDT)
@@ -813,12 +821,12 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
         
         # Connect all points with a line
         plt.plot(context_indices_interpolated, interpolated_context, 
-                color='blue', linewidth=1, linestyle='-.', alpha=0.7)
+                color='blue', linewidth=2, linestyle='-.', alpha=0.7)
         
         plt.plot(forecast_indices, result_interpolated['ground_truth'], label='Ground Truth', 
-                color='green', linewidth=1, marker='o', markersize=4, linestyle='-.')
+                color='green', linewidth=3, marker='o', markersize=4, linestyle='-.')
         plt.plot(forecast_indices, result_interpolated['prediction'], label='Prediction', 
-                color='red', linewidth=1, linestyle='-.', marker='s', markersize=4)
+                color='red', linewidth=2, linestyle='-.', marker='s', markersize=4)
         plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
         
         plt.title(f"4. Interpolated Context (50% samples replaced, len={context_len_interpolated}) - Sample {result_interpolated['window_id']} - MAE: {result_interpolated['mae']:.4f}")
@@ -841,11 +849,11 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
         truncated_indices = np.arange(truncated_start_index, 0)
         
         plt.plot(truncated_indices, result_truncated['context'], label='Truncated Context (most recent)', 
-                color='blue', linewidth=1, linestyle='-.', marker='o', markersize=4)
+                color='blue', linewidth=2, linestyle='-.', marker='o', markersize=4)
         plt.plot(forecast_indices, result_truncated['ground_truth'], label='Ground Truth', 
-                color='green', linewidth=1, marker='o', markersize=4, linestyle='-.')
+                color='green', linewidth=3, marker='o', markersize=4, linestyle='-.')
         plt.plot(forecast_indices, result_truncated['prediction'], label='Prediction', 
-                color='red', linewidth=1, linestyle='-.', marker='s', markersize=4)
+                color='red', linewidth=2, linestyle='-.', marker='s', markersize=4)
         plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
         
         # Get x-axis limits from the full context case to ensure consistency
@@ -884,19 +892,19 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
                 selected_positions = ctx_indices[important_indices]
                 selected_values = original_signal[important_indices]
                 
-                plt.plot(selected_positions, selected_values, 'o-', color='blue', linewidth=1, 
+                plt.plot(selected_positions, selected_values, 'o-', color='blue', linewidth=2, 
                         linestyle='-.', markersize=4, label='Surprisal-based Context (50% most important)')
             else:
                 # Fallback: plot as contiguous block if surprisal data not available
                 unc_start_index = -context_len_unc_short
                 unc_indices = np.arange(unc_start_index, 0)
-                plt.plot(unc_indices, result_surprisal_short['context'], 'o-', color='blue', linewidth=1, 
+                plt.plot(unc_indices, result_surprisal_short['context'], 'o-', color='blue', linewidth=2, 
                         linestyle='-.', markersize=4, label='Surprisal-based Context (50% most important)')
             
             plt.plot(forecast_indices, result_surprisal_short['ground_truth'], label='Ground Truth', 
-                    color='green', linewidth=1, marker='o', markersize=4, linestyle='-.')
+                    color='green', linewidth=3, marker='o', markersize=4, linestyle='-.')
             plt.plot(forecast_indices, result_surprisal_short['prediction'], label='Prediction', 
-                    color='red', linewidth=1, linestyle='-.', marker='s', markersize=4)
+                    color='red', linewidth=2, linestyle='-.', marker='s', markersize=4)
             plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
             
             # Set x-axis limits to match other methods
@@ -936,12 +944,12 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             
             # Connect all points with a line
             plt.plot(context_indices_unc_interp, unc_interpolated_context, 
-                    color='blue', linewidth=1, linestyle='-.', alpha=0.7)
+                    color='blue', linewidth=2, linestyle='-.', alpha=0.7)
             
             plt.plot(forecast_indices, result_surprisal_interpolated['ground_truth'], label='Ground Truth', 
-                    color='green', linewidth=1, marker='o', markersize=4, linestyle='-.')
+                    color='green', linewidth=3, marker='o', markersize=4, linestyle='-.')
             plt.plot(forecast_indices, result_surprisal_interpolated['prediction'], label='Prediction', 
-                    color='red', linewidth=1, linestyle='-.', marker='s', markersize=4)
+                    color='red', linewidth=2, linestyle='-.', marker='s', markersize=4)
             plt.axvline(x=0, color='black', linestyle=':', alpha=0.7, label='Forecast Start')
             
             plt.title(f"7. Surprisal-based Interpolated Context (50% least important replaced, len={context_len_unc_interp}) - Sample {result_surprisal_interpolated['window_id']} - MAE: {result_surprisal_interpolated['mae']:.4f}")
@@ -1040,9 +1048,9 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             
             # Plot the signal (last CTX samples)
             ctx_indices = np.arange(-CTX, 0)
-            line1 = ax1.plot(ctx_indices, signal, 'o-', color='blue', linewidth=1, 
+            line1 = ax1.plot(ctx_indices, signal, 'o-', color='blue', linewidth=2, 
                             linestyle='-.', markersize=4, label='Actual Signal')
-            line2 = ax1.plot(ctx_indices, predictions, 's-', color='orange', linewidth=1, 
+            line2 = ax1.plot(ctx_indices, predictions, 's-', color='orange', linewidth=2, 
                             linestyle='-.', markersize=4, alpha=0.8, label='AR Predictions')
             ax1.set_xlabel('Time Steps')
             ax1.set_ylabel('Signal Value', color='blue')
@@ -1050,7 +1058,7 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             ax1.grid(True, alpha=0.3)
 
             # Plot the surprisal map
-            line3 = ax1_twin.plot(ctx_indices, surprisal, 's-', color='red', linewidth=1, 
+            line3 = ax1_twin.plot(ctx_indices, surprisal, 's-', color='red', linewidth=2, 
                                 linestyle='-.', markersize=4, alpha=0.7, label='Surprisal Score')
             ax1_twin.set_ylabel('Surprisal Score', color='red')
             ax1_twin.tick_params(axis='y', labelcolor='red')
@@ -1070,11 +1078,11 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             ax2_twin = ax2.twinx()  # Create twin axis for squared error term
             
             # Plot surprisal score (total)
-            line4 = ax2.plot(ctx_indices, surprisal, 's-', color='red', linewidth=1, 
+            line4 = ax2.plot(ctx_indices, surprisal, 's-', color='red', linewidth=3, 
                             linestyle='-', markersize=4, alpha=0.9, label='Total Surprisal Score')
             
             # Plot log normalizer component
-            line5 = ax2.plot(ctx_indices, log_normalizers, 'o-', color='purple', linewidth=1, 
+            line5 = ax2.plot(ctx_indices, log_normalizers, 'o-', color='purple', linewidth=2, 
                             linestyle='-.', markersize=4, alpha=0.8, label='Log Normalizer Component')
             ax2.set_xlabel('Time Steps')
             ax2.set_ylabel('Log Normalizer & Total Surprisal', color='purple')
@@ -1082,30 +1090,10 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             ax2.grid(True, alpha=0.3)
             
             # Plot squared error term component on twin axis
-            line6 = ax2_twin.plot(ctx_indices, squared_error_terms, '^-', color='green', linewidth=1, 
+            line6 = ax2_twin.plot(ctx_indices, squared_error_terms, '^-', color='green', linewidth=2, 
                                 linestyle='-.', markersize=4, alpha=0.8, label='Squared Error Term')
             ax2_twin.set_ylabel('Squared Error Term', color='green')
             ax2_twin.tick_params(axis='y', labelcolor='green')
-            
-            # Set same scale for both y-axes for easier comparison
-            # Get the range of values for both axes
-            left_data = np.concatenate([surprisal, log_normalizers])
-            right_data = squared_error_terms
-            
-            # Calculate combined min and max values
-            all_data = np.concatenate([left_data, right_data])
-            y_min = np.min(all_data)
-            y_max = np.max(all_data)
-            
-            # Add some padding (5% on each side)
-            y_range = y_max - y_min
-            y_padding = y_range * 0.05
-            y_min_padded = y_min - y_padding
-            y_max_padded = y_max + y_padding
-            
-            # Set the same limits for both y-axes
-            ax2.set_ylim(y_min_padded, y_max_padded)
-            ax2_twin.set_ylim(y_min_padded, y_max_padded)
             
             # Add patch size in red text on top right
             ax2.text(0.98, 0.95, f'PSZ: {PSZ}', transform=ax2.transAxes, color='red', 
@@ -1125,115 +1113,6 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
             plt.show()
             print(f"Saved surprisal components analysis plot: {surprisal_plot_filename}")
             
-            # Create additional plot showing only the final 256 samples for easier visualization
-            print(f"Creating focused view plot (final 256 samples) for sample {plot_idx}...")
-            
-            # Determine how many samples to show (256 or less if CTX < 256)
-            focus_window = min(256, CTX)
-            start_idx = CTX - focus_window
-            
-            # Extract data for the final 256 samples
-            focus_signal = signal[start_idx:]
-            focus_surprisal = surprisal[start_idx:]
-            focus_predictions = predictions[start_idx:]
-            focus_log_normalizers = log_normalizers[start_idx:]
-            focus_squared_error_terms = squared_error_terms[start_idx:]
-            
-            # Create focused time indices
-            focus_ctx_indices = np.arange(-focus_window, 0)
-            
-            # Create figure with 2 subplots for focused view
-            fig_focus, (ax1_focus, ax2_focus) = plt.subplots(2, 1, figsize=(15, 10))
-            
-            # Plot 1: Actual Signal, AR Predictions and Surprisal Score (focused view)
-            ax1_focus_twin = ax1_focus.twinx()  # Create twin axis for surprisal
-            
-            # Plot the signal (final focus_window samples)
-            line1_focus = ax1_focus.plot(focus_ctx_indices, focus_signal, 'o-', color='blue', linewidth=1, 
-                            linestyle='-.', markersize=4, label='Actual Signal')
-            line2_focus = ax1_focus.plot(focus_ctx_indices, focus_predictions, 's-', color='orange', linewidth=1, 
-                            linestyle='-.', markersize=4, alpha=0.8, label='AR Predictions')
-            ax1_focus.set_xlabel('Time Steps')
-            ax1_focus.set_ylabel('Signal Value', color='blue')
-            ax1_focus.tick_params(axis='y', labelcolor='blue')
-            ax1_focus.grid(True, alpha=0.3)
-
-            # Plot the surprisal map
-            line3_focus = ax1_focus_twin.plot(focus_ctx_indices, focus_surprisal, 's-', color='red', linewidth=1, 
-                                linestyle='-.', markersize=4, alpha=0.7, label='Surprisal Score')
-            ax1_focus_twin.set_ylabel('Surprisal Score', color='red')
-            ax1_focus_twin.tick_params(axis='y', labelcolor='red')
-            
-            # Add patch size in red text on top right
-            ax1_focus.text(0.98, 0.95, f'PSZ: {PSZ}', transform=ax1_focus.transAxes, color='red', 
-                    fontsize=12, fontweight='bold', ha='right', va='top')
-            
-            # Create combined legend
-            lines1_focus, labels1_focus = ax1_focus.get_legend_handles_labels()
-            lines3_focus, labels3_focus = ax1_focus_twin.get_legend_handles_labels()
-            ax1_focus.legend(lines1_focus + lines3_focus, labels1_focus + labels3_focus, loc='upper left')
-            
-            ax1_focus.set_title(f'Focused View: Signal & Surprisal (Final {focus_window} samples) - Sample {plot_idx} (Index {idx})')
-            
-            # Plot 2: Surprisal Score Components (focused view)
-            ax2_focus_twin = ax2_focus.twinx()  # Create twin axis for squared error term
-            
-            # Plot surprisal score (total)
-            line4_focus = ax2_focus.plot(focus_ctx_indices, focus_surprisal, 's-', color='red', linewidth=1, 
-                            linestyle='-', markersize=4, alpha=0.9, label='Total Surprisal Score')
-            
-            # Plot log normalizer component
-            line5_focus = ax2_focus.plot(focus_ctx_indices, focus_log_normalizers, 'o-', color='purple', linewidth=1, 
-                            linestyle='-.', markersize=4, alpha=0.8, label='Log Normalizer Component')
-            ax2_focus.set_xlabel('Time Steps')
-            ax2_focus.set_ylabel('Log Normalizer & Total Surprisal', color='purple')
-            ax2_focus.tick_params(axis='y', labelcolor='purple')
-            ax2_focus.grid(True, alpha=0.3)
-            
-            # Plot squared error term component on twin axis
-            line6_focus = ax2_focus_twin.plot(focus_ctx_indices, focus_squared_error_terms, '^-', color='green', linewidth=1, 
-                                linestyle='-.', markersize=4, alpha=0.8, label='Squared Error Term')
-            ax2_focus_twin.set_ylabel('Squared Error Term', color='green')
-            ax2_focus_twin.tick_params(axis='y', labelcolor='green')
-            
-            # Set same scale for both y-axes for easier comparison (focused data)
-            # Get the range of values for both axes
-            left_data_focus = np.concatenate([focus_surprisal, focus_log_normalizers])
-            right_data_focus = focus_squared_error_terms
-            
-            # Calculate combined min and max values
-            all_data_focus = np.concatenate([left_data_focus, right_data_focus])
-            y_min_focus = np.min(all_data_focus)
-            y_max_focus = np.max(all_data_focus)
-            
-            # Add some padding (5% on each side)
-            y_range_focus = y_max_focus - y_min_focus
-            y_padding_focus = y_range_focus * 0.05
-            y_min_padded_focus = y_min_focus - y_padding_focus
-            y_max_padded_focus = y_max_focus + y_padding_focus
-            
-            # Set the same limits for both y-axes
-            ax2_focus.set_ylim(y_min_padded_focus, y_max_padded_focus)
-            ax2_focus_twin.set_ylim(y_min_padded_focus, y_max_padded_focus)
-            
-            # Add patch size in red text on top right
-            ax2_focus.text(0.98, 0.95, f'PSZ: {PSZ}', transform=ax2_focus.transAxes, color='red', 
-                    fontsize=12, fontweight='bold', ha='right', va='top')
-            
-            # Create combined legend
-            lines4_focus, labels4_focus = ax2_focus.get_legend_handles_labels()
-            lines6_focus, labels6_focus = ax2_focus_twin.get_legend_handles_labels()
-            ax2_focus.legend(lines4_focus + lines6_focus, labels4_focus + labels6_focus, loc='upper left')
-            
-            ax2_focus.set_title(f'Focused View: Surprisal Components (Final {focus_window} samples) - Sample {plot_idx} (Index {idx})')
-            
-            # Save the focused surprisal analysis plot
-            focused_plot_filename = os.path.join(results_dir, f"sample_{plot_idx}_surprisal_components_focused_{focus_window}samples.png")
-            plt.tight_layout()
-            plt.savefig(focused_plot_filename, dpi=300, bbox_inches='tight')
-            plt.show()
-            print(f"Saved focused surprisal components analysis plot: {focused_plot_filename}")
-            
         else:
             print(f"Warning: No surprisal data available for sample {idx} (plot {plot_idx})")
 
@@ -1245,18 +1124,13 @@ def run_moirai_inference(MODEL="moirai", SIZE="large", DATASET_FOLDER = "/home",
 if __name__ == "__main__":
     
     # Configuration lists
-    patch_sizes = [32]
-    compression_ratios = [1/2]#, 1/4, 1/8]
+    patch_sizes = [8, 16]
+    compression_ratios = [1/2, 1/4]
 
    
     MODEL = "moirai"
     SIZE = "large"
-    DATASET_FOLDER = f"{HOME}/time-series/datasets/time-moe-eval/"
-    MODEL_FOLDER = "Salesforce"
-    # CSV = "ETT-small/ETTm1.csv"
-    CSV = "synthetic_sinusoidal.csv"
-    COLUMN = 3
-    CTX = 2048
+    CTX = 512
     PDT = 64
     BSZ = 32
     GPU = 0
@@ -1282,10 +1156,6 @@ if __name__ == "__main__":
                 mae_summary = run_moirai_inference(
                     MODEL=MODEL,
                     SIZE=SIZE,
-                    DATASET_FOLDER=DATASET_FOLDER,
-                    MODEL_FOLDER=MODEL_FOLDER,
-                    CSV=CSV,
-                    COLUMN=COLUMN,
                     CTX=CTX,
                     PDT=PDT,
                     BSZ=BSZ,
